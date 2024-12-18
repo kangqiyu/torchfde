@@ -1,4 +1,4 @@
-# torchfde: PyTorch Implementation of Differentiable FDE Solvers
+# torchfde: Differentiable FDE Solvers in PyTorch
 
 The preliminary version (no adjoint backpropagation) of this library is at https://github.com/zknus/torchfde
 
