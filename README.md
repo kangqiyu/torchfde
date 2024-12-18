@@ -10,7 +10,7 @@ Recent progress at the intersection of FDEs and deep learning has catalyzed a ne
 
 2. Q. Kang, K. Zhao, Y. Song, Y. Xie, Y. Zhao, S. Wang, R. She, and W. P. Tay, “[Coupling graph neural networks with fractional order continuous dynamics: A robustness study](https://arxiv.org/pdf/2401.04331),” Proc. AAAI Conference on Artificial Intelligence, Vancouver, Canada, Feb. 2024.
    
-3. W. Cui, Q. Kang, X. Li, K. Zhao, W. P. Tay, W. Deng, and Y. Li, “Neural variable-order fractional differential equation networks,” in Proc. AAAI Conference on Artificial Intelligence (AAAI), Philadelphia, USA, Feb. 2025.
+3. W. Cui, Q. Kang, X. Li, K. Zhao, W. P. Tay, W. Deng, and Y. Li, “[Neural variable-order fractional differential equation networks](https://github.com/cuiwjTech/AAAI2025_NvoFDE),” in Proc. AAAI Conference on Artificial Intelligence (AAAI), Philadelphia, USA, Feb. 2025.
    
 4. K. Zhao, X. Li, Q. Kang†, F. Ji, Q. Ding, Y. Zhao, W. Liang, and W. P. Tay, “[Distributed-order fractional graph operating network](https://arxiv.org/pdf/2411.05274)," Advances in Neural Information Processing Systems (NeurIPS), Vancouver, Canada, Dec. 2024, __Spotlight__.
 
