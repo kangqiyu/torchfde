@@ -2,7 +2,7 @@ import torch
 
 import warnings
 
-def _check_inputs(func, y0, t, step_size,method,beta, SOLVERS):
+def _check_inputs(func, y0, t, step_size, method, beta, SOLVERS):
 
 
 

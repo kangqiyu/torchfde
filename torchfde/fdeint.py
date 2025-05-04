@@ -47,4 +47,3 @@ def fdeint(func,y0,beta,t,step_size,method,options=None):
     solution = SOLVERS[method](func=func, y0=y0, beta=beta, tspan=tspan,**options)
 
     return solution
-
