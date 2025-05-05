@@ -46,7 +46,7 @@ class FDEAdjointMethod(torch.autograd.Function):
         beta = ctx.beta
         method = ctx.method
         f_params = tuple(func.parameters())
-
+        n_tensors = len(ans)
 
         def augmented_dynamics(t, y_aug):
             y, adj_y, _ = y_aug
@@ -54,19 +54,21 @@ class FDEAdjointMethod(torch.autograd.Function):
             with torch.set_grad_enabled(True):
                 y = tuple(y_.detach().requires_grad_(True) for y_ in y)
                 func_eval = func(t, y)
-                temp = torch.autograd.grad(
+                vjp_y_and_params = torch.autograd.grad(
                     func_eval, (y, ) + f_params,
-                    adj_y, allow_unused=True, retain_graph=True
+                    tuple(adj_y_ for adj_y_ in adj_y), allow_unused=True, retain_graph=True
                 )
-                vjp_y, *vjp_params = temp
+
+            vjp_y = vjp_y_and_params[:n_tensors]
+            vjp_params = vjp_y_and_params[n_tensors:]
 
             # autograd.grad returns None if no gradient, set to zero.
-            vjp_y = torch.zeros_like(y) if vjp_y is None else vjp_y
+            vjp_y = tuple(torch.zeros_like(y_) if vjp_y_ is None else vjp_y_ for vjp_y_, y_ in zip(vjp_y, y))
             vjp_params = _flatten_convert_none_to_zeros(vjp_params, f_params)
 
             if len(f_params) == 0:
                 vjp_params = torch.tensor(0.).to(vjp_y[0])
-            return (func_eval, vjp_y, vjp_params)
+            return (func_eval, tuple(vjp_y), vjp_params)
 
         tspan_flip = tspan.flip(0)
 
