@@ -30,10 +30,10 @@ parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--method', type=str, choices=
                             ['predictor-f','predictor-o', 'gl-f', 'gl-o', 'trap-f', 'trap-o', #for adjoint method
                             'predictor','corrector', 'implicitl1', 'gl', 'trap' # for direct method
-                            ], default='gl-f')
+                            ], default='corrector')
 
 # parameters for the FDE solver
-parser.add_argument('--adjoint', type=eval, default=True, choices=[True, False])
+parser.add_argument('--adjoint', type=eval, default=False, choices=[True, False])
 parser.add_argument('--step_size', type=float, default=0.1)
 parser.add_argument('--beta', type=float, default=0.5)
 parser.add_argument('--T', type=float, default=20)
@@ -139,7 +139,8 @@ class ODEBlock(nn.Module):
         self.odefunc = odefunc
 
     def forward(self, x):
-        out = fdeint(self.odefunc, x, torch.tensor(args.beta), t=args.T, step_size=args.step_size, method=args.method)
+        out = fdeint(self.odefunc, x, torch.tensor(args.beta), t=args.T,
+                     step_size=args.step_size, method=args.method, options={"corrector_step": 5,})
         return out
 
 

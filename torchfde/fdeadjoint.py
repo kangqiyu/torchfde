@@ -6,8 +6,7 @@ from .utils_fde import _flatten, _flatten_convert_none_to_zeros,_check_inputs
 # from .explicit_solver import Predictor,Predictor_Corrector
 # from .implicit_solver import Implicit_l1
 # from .riemann_liouville_solver import GLmethod,Product_Trap
-
-import pdb
+# import pdb
 
 
 class FDEAdjointMethod(torch.autograd.Function):
@@ -53,7 +52,7 @@ class FDEAdjointMethod(torch.autograd.Function):
             y, adj_y, _ = y_aug
 
             with torch.set_grad_enabled(True):
-                y = y.detach().requires_grad_(True)
+                y = tuple(y_.detach().requires_grad_(True) for y_ in y)
                 func_eval = func(t, y)
                 temp = torch.autograd.grad(
                     func_eval, (y, ) + f_params,
@@ -114,8 +113,7 @@ def fdeint_adjoint(func,y0,beta,t,step_size,method,options=None):
     if not isinstance(func, nn.Module):
         raise ValueError('func is required to be an instance of nn.Module.')
 
-    tensor_input = False
-    func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
+    tensor_input, func, y0, tspan, method, beta= _check_inputs(func, y0, t,step_size,method,beta, SOLVERS)
 
     if options is None:
         options = {}

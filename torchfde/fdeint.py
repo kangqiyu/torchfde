@@ -41,9 +41,12 @@ def fdeint(func,y0,beta,t,step_size,method,options=None):
       Raises:
           ValueError: if an invalid `method` is provided.
       """
-    func, y0, tspan, method, beta= _check_inputs(func, y0, t,step_size,method,beta, SOLVERS)
+    tensor_input, func, y0, tspan, method, beta= _check_inputs(func, y0, t,step_size,method,beta, SOLVERS)
     if options is None:
         options = {}
     solution = SOLVERS[method](func=func, y0=y0, beta=beta, tspan=tspan,**options)
+
+    if tensor_input:
+        solution = solution[0]
 
     return solution
