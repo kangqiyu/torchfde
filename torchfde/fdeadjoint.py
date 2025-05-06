@@ -2,10 +2,11 @@ import torch
 import math
 import torch.nn as nn
 from .utils_fde import _flatten, _flatten_convert_none_to_zeros,_check_inputs
+from .utils_fde import _is_tuple, _clone, _add, _multiply, _minus, ReversedListView
 # from . import fdeint
 # from .explicit_solver import Predictor,Predictor_Corrector
 # from .implicit_solver import Implicit_l1
-# from .riemann_liouville_solver import GLmethod,Product_Trap
+from .riemann_liouville_solver import RLcoeffs
 # import pdb
 
 
@@ -13,10 +14,10 @@ class FDEAdjointMethod(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, *args):
-        assert len(args) == 7, 'Internal error: all arguments required.'
+        assert len(args) >= 7, 'Internal error: all arguments required.'
         y0, func, beta, tspan, flat_params, method, options = \
-            args[-7], args[-6], args[-5], args[-4], args[-3], args[-2], args[-1]
-
+            args[:-6], args[-6], args[-5], args[-4], args[-3], args[-2], args[-1]
+        y0 = tuple(y0)
         ctx.func = func
         ctx.beta = beta
         ctx.method = method
@@ -24,22 +25,19 @@ class FDEAdjointMethod(torch.autograd.Function):
         with torch.no_grad():
             ans, yhistory = SOLVERS[method](func=func, y0=y0, beta=beta, tspan=tspan,**options)
 
-        if any(t.requires_grad for t in [y0, *flat_params]):
-            # Stack and save the history only if gradients need to be computed
-            if yhistory is not None:
-                yhistory = torch.stack(yhistory)
-            ctx.save_for_backward(tspan, flat_params, ans, yhistory)
+        if any(t.requires_grad for t in [*y0, *flat_params]):
+            ctx.save_for_backward(tspan, flat_params, *ans)
+            ctx.yhistory = yhistory
         else:
             del yhistory
-
-
 
         return ans
 
     @staticmethod
-    def backward(ctx, grad_output):
-        tspan, flat_params, ans, yhistory = ctx.saved_tensors
-
+    def backward(ctx, *grad_output):
+        tspan, flat_params, *ans = ctx.saved_tensors
+        yhistory = ctx.yhistory
+        ans = tuple(ans)
         # yhistory = yhistory_#.clone().detach().requires_grad_(True)
 
         func = ctx.func
@@ -55,7 +53,7 @@ class FDEAdjointMethod(torch.autograd.Function):
                 y = tuple(y_.detach().requires_grad_(True) for y_ in y)
                 func_eval = func(t, y)
                 vjp_y_and_params = torch.autograd.grad(
-                    func_eval, (y, ) + f_params,
+                    func_eval, y + f_params,
                     tuple(adj_y_ for adj_y_ in adj_y), allow_unused=True, retain_graph=True
                 )
 
@@ -68,12 +66,12 @@ class FDEAdjointMethod(torch.autograd.Function):
 
             if len(f_params) == 0:
                 vjp_params = torch.tensor(0.).to(vjp_y[0])
-            return (func_eval, tuple(vjp_y), vjp_params)
+            return (func_eval, vjp_y, vjp_params)  ## return (tuple, tuple, vector)
 
         tspan_flip = tspan.flip(0)
 
         if yhistory is not None:
-            yhistory_flip = yhistory.flip(0)
+            yhistory_flip = ReversedListView(yhistory)
         else:
             yhistory_flip = None
 
@@ -103,9 +101,9 @@ class FDEAdjointMethod(torch.autograd.Function):
                 augmented_dynamics, aug_y0, beta,
                 tspan_flip, yhistory_flip)
 
-        del yhistory_flip
+        del yhistory_flip, ctx.yhistory
 
-        return (adj_y, None, None, None, adj_params, None, None)
+        return (*adj_y, None, None, None, adj_params, None, None)
 
 
 def fdeint_adjoint(func,y0,beta,t,step_size,method,options=None):
@@ -115,13 +113,28 @@ def fdeint_adjoint(func,y0,beta,t,step_size,method,options=None):
     if not isinstance(func, nn.Module):
         raise ValueError('func is required to be an instance of nn.Module.')
 
-    tensor_input, func, y0, tspan, method, beta= _check_inputs(func, y0, t,step_size,method,beta, SOLVERS)
+    tensor_input = False
+    if torch.is_tensor(y0):
+        class TupleFunc(nn.Module):
+
+            def __init__(self, base_func):
+                super(TupleFunc, self).__init__()
+                self.base_func = base_func
+
+            def forward(self, t, y):
+                return (self.base_func(t, y[0]),)
+
+        tensor_input = True
+        y0 = (y0,)
+        func = TupleFunc(func)
+
+    _, _, y0, tspan, method, beta= _check_inputs(func, y0, t,step_size,method,beta, SOLVERS)
 
     if options is None:
         options = {}
 
     flat_params = _flatten(func.parameters())
-    ys = FDEAdjointMethod.apply(y0, func, beta, tspan, flat_params, method, options)
+    ys = FDEAdjointMethod.apply(*y0, func, beta, tspan, flat_params, method, options)
 
     if tensor_input:
         ys = ys[0]
@@ -142,27 +155,31 @@ def BackwardMixedOrderPredictor_f(func, y_aug, beta, tspan, yhistory, **options)
         # print("h: ", h)
         gamma_beta =  1 / math.gamma(beta)
         fadj_history = []
+
         if True:#yhistory is None:
             fy_history = []
+
         y0, adj_y0, adj_params0 = y_aug ### we will use yhistory rather than compute y again
-        device = adj_y0.device
-        #change all y_n to adj_y
 
-        adj_y = adj_y0.clone()
-        adj_params = adj_params0.clone()
-        y = y0.clone()
+        if _is_tuple(y0):
+            device = y0[0].device
+        else:
+            device = y0.device
 
-        for k in range(N):
+        adj_y = _clone(adj_y0)
+        adj_params = _clone(adj_params0)
+        y = _clone(y0)
+
+        for k in range(N-1):
             tn = tspan[k]
             j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
             b_j_k_1 = (fractional_pow(h, beta) / beta) * (
                         fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
 
 
-
-
             fy_k, fadj_k, jp_params_k = func(tn, (y, adj_y, adj_params))
             fadj_history.append(fadj_k)
+
             if yhistory is None:
                 fy_history.append(fy_k)
             # can apply short memory here
@@ -172,59 +189,80 @@ def BackwardMixedOrderPredictor_f(func, y_aug, beta, tspan, yhistory, **options)
                 memory = options['memory']
             memory_k = max(0, k - memory)
 
-            sample_product = b_j_k_1[memory_k] * fadj_history[memory_k]
-            b_all_k = torch.zeros_like(sample_product)  # Initialize accumulator with zeros of the same shape as the product
+            if _is_tuple(fadj_history[memory_k]):
+                b_all_k = tuple(torch.zeros_like(f_i) for f_i in fadj_history[memory_k])
+            else:
+                b_all_k = torch.zeros_like(fadj_history[memory_k])
+
             # Loop through the range and accumulate results
             for i in range(memory_k, k + 1):
-                b_all_k += b_j_k_1[i] * fadj_history[i]
+                b_all_k = _add(b_all_k, _multiply(b_j_k_1[i], fadj_history[i]))
 
-            # temp_product = torch.stack([b_j_k_1[i] * fadj_history[i] for i in range(memory_k,k + 1)])
-            # b_all_k = torch.sum(temp_product, dim=0)
-            adj_y = adj_y0 + gamma_beta * b_all_k
+
+            # Final update step
+            weight_term = _multiply(gamma_beta, b_all_k)
+            adj_y = _add(adj_y0, weight_term)
 
             if yhistory is not None and k<N-1:
                 y = yhistory[k+1]
             elif yhistory is None:
-                # temp_product = torch.stack([b_j_k_1[i] * fy_history[i] for i in range(memory_k, k + 1)])
-                # b_all_k = torch.sum(temp_product, dim=0)
 
-                sample_product = b_j_k_1[memory_k] * fy_history[memory_k]
-                b_all_k = torch.zeros_like(
-                    sample_product)  # Initialize accumulator with zeros of the same shape as the product
+                if _is_tuple(fy_history[memory_k]):
+                    b_all_k = tuple(torch.zeros_like(f_i) for f_i in fy_history[memory_k])
+                else:
+                    b_all_k = torch.zeros_like(fy_history[memory_k])
+
                 # Loop through the range and accumulate results
                 for i in range(memory_k, k + 1):
-                    b_all_k += b_j_k_1[i] * fy_history[i]
-                y = y0 + gamma_beta * b_all_k
+                    b_all_k = _add(b_all_k, _multiply(b_j_k_1[i], fy_history[i]))
 
+                weight_term = _multiply(gamma_beta, b_all_k)
+                y = _add(y0, weight_term)
 
             adj_params = adj_params + h * jp_params_k
-
-
 
     # release memory
     del fadj_history, yhistory, fy_history
     del b_j_k_1
-    del sample_product
     return adj_y, adj_params
 
 
 def ForwardPredictor_w_History(func, y0, beta, tspan, **options):
+    """Use one-step Adams-Bashforth (Euler) method to integrate Caputo equation
+        D^beta y(t) = f(t,y)
+        Args:
+          beta: fractional exponent in the range (0,1)
+          f: callable(y,t) returning a numpy array of shape (d,)
+             Vector-valued function to define the right hand side of the system
+          y0: N-D Tensor or tuple of Tensors giving the initial state vector y(t==0)
+          tspan (array): The sequence of time points for which to solve for y.
+            These must be equally spaced, e.g. np.arange(0,10,0.005)
+            tspan[0] is the intial time corresponding to the initial state y0.
+        Returns:
+          y: Tensor or tuple of Tensors with the same structure as y0
+             With the initial value y0 in the first row
+        """
     with torch.no_grad():
         N = len(tspan)
-        # print("N: ", N)
         h = (tspan[-1] - tspan[0]) / (N - 1)
-        # print("h: ", h)
+        h = torch.abs(h)
         gamma_beta = 1 / math.gamma(beta)
         fhistory = []
         yhistory = []
-        device = y0.device
-        yn = y0.clone()
 
-        for k in range(N):
+        # Get device from y0 (handle both tensor and tuple cases)
+        if _is_tuple(y0):
+            device = y0[0].device
+        else:
+            device = y0.device
+
+        yn = _clone(y0)
+
+        for k in range(N - 1):
             tn = tspan[k]
             f_k = func(tn, yn)
             fhistory.append(f_k)
-            yhistory.append(f_k)
+            yhistory.append(yn)
 
             # can apply short memory here
             if 'memory' not in options:
@@ -237,21 +275,29 @@ def ForwardPredictor_w_History(func, y0, beta, tspan, **options):
             b_j_k_1 = (fractional_pow(h, beta) / beta) * (
                     fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
 
-            sample_product = b_j_k_1[memory_k] * fhistory[memory_k]
-            b_all_k = torch.zeros_like(sample_product)  # Initialize accumulator with zeros of the same shape as the product
+            # Initialize accumulator with correct structure (tensor or tuple)
+            if _is_tuple(fhistory[memory_k]):
+                b_all_k = tuple(torch.zeros_like(f_i) for f_i in fhistory[memory_k])
+            else:
+                b_all_k = torch.zeros_like(fhistory[memory_k])
+
             # Loop through the range and accumulate results
             for i in range(memory_k, k + 1):
-                b_all_k += b_j_k_1[i] * fhistory[i]
+                b_all_k = _add(b_all_k, _multiply(b_j_k_1[i], fhistory[i]))
 
-            # temp_product = torch.stack([b_j_k_1[i] * fhistory[i] for i in range(memory_k, k + 1)])
-            # b_all_k = torch.sum(temp_product, dim=0)
-            yn = y0 + gamma_beta * b_all_k
-    # release memory
-    del fhistory
-    del b_j_k_1
-    del sample_product
-    return yn, yhistory
+            # Final update step
+            weight_term = _multiply(gamma_beta, b_all_k)
+            yn = _add(y0, weight_term)
 
+        yhistory.append(yn)
+
+        # release memory
+        del fhistory
+        del b_j_k_1
+        return yn, yhistory
+
+
+# TODO: need to revise it to accept tuple of tensors as input
 def ForwardPredictor_wo_History(func, y0, beta, tspan, **options):
     with torch.no_grad():
         N = len(tspan)
@@ -303,54 +349,88 @@ def BackwardMixedOrderGLmethod_f(func, y_aug, beta, tspan, yhistory_ori):
         h = torch.abs(h)
         _, adj_y0, adj_params0 = y_aug ### we will use yhistory_ori rather than compute y again
 
-        device = adj_y0.device
+        if _is_tuple(adj_y0):
+            device = adj_y0[0].device
+        else:
+            device = adj_y0.device
 
-        adj_y = adj_y0.clone()
-        adj_params = adj_params0.clone()
+        adj_y = _clone(adj_y0)
+        adj_params = _clone(adj_params0)
 
         c = torch.zeros(N + 1, dtype=torch.float64, device=device)
         c[0] = 1
         for j in range(1, N + 1):
             c[j] = (1 - (1 + beta) / j) * c[j - 1]
-        y_history = []
-        y_history.append(adj_y)
+        h_power = torch.pow(h, beta)
+
+        adjy_history = [adj_y]
+
         for k in range(1, N):
             tn = tspan[k]
-            right = 0
+
+            # Initialize right term with correct structure
+            if _is_tuple(adj_y0):
+                right = tuple(torch.zeros_like(comp) for comp in adj_y0)
+            else:
+                right = 0
+
             for j in range(1, k + 1):
-                right = (right + c[j] * y_history[k - j])
+                right = _add(right, _multiply(c[j], adjy_history[k - j]))
 
             y_ori = yhistory_ori[k]
-            func_eval, f_k, jp_params_k = func(tn, (y_ori, adj_y, adj_params))
-            adj_y = f_k * torch.pow(h, beta) - right
+            func_eval, f_term, jp_params = func(tn, (y_ori, adj_y, adj_params))
 
-            y_history.append(adj_y)
+            f_h_term = _multiply(h_power, f_term)
+            adj_y = _minus(f_h_term, right)
 
-            adj_params = adj_params + h * jp_params_k
+            adjy_history.append(adj_y)
 
-    del y_history, yhistory_ori
+            adj_params = adj_params + h * jp_params
+
+    del adjy_history, yhistory_ori
     return adj_y, adj_params
 
 def ForwardGLmethod_w_History(func,y0,beta,tspan,**options):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
-        device = y0.device
-        c = torch.zeros(N + 1, dtype=torch.float64,device=device)
+        h = torch.abs(h)
+        # Get device from y0 (handle both tensor and tuple cases)
+        if _is_tuple(y0):
+            device = y0[0].device
+        else:
+            device = y0.device
+
+        c = torch.zeros(N + 1, dtype=torch.float64, device=device)
         c[0] = 1
         for j in range(1, N + 1):
             c[j] = (1 - (1 + beta) / j) * c[j - 1]
-        yn = y0.clone()
-        y_history = []
-        y_history.append(yn)
+
+        yn = _clone(y0)
+        y_history = [yn]
+
         for k in range(1, N):
             tn = tspan[k]
-            right = 0
+
+            # Initialize right term with correct structure
+            if _is_tuple(y0):
+                right = tuple(torch.zeros_like(comp) for comp in y0)
+            else:
+                right = 0
+
             for j in range(1, k + 1):
-                right = (right + c[j] * y_history[k - j])
-            yn = func(tn, yn) * torch.pow(h, beta) - right
+                right = _add(right, _multiply(c[j], y_history[k - j]))
+
+            # Calculate f(tn, yn) * h^beta term
+            f_term = func(tn, yn)
+            h_power = torch.pow(h, beta)
+
+            f_h_term = _multiply(h_power, f_term)
+            # Subtract right from f_h_term
+            yn = _minus(f_h_term, right)
             y_history.append(yn)
-    return yn, y_history
+
+        return yn, y_history
 
 
 
@@ -359,66 +439,101 @@ def BackwardMixedOrderTrap_f(func, y_aug, beta, tspan, yhistory_ori):
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
         h = torch.abs(h)
-        _, adj_y0, adj_params0 = y_aug
-        device = adj_y0.device
 
-        adj_y = adj_y0.clone()
-        adj_params = adj_params0.clone()
+        _, adj_y0, adj_params0 = y_aug  ### we will use yhistory_ori rather than compute y again
 
-        y_history = []
-        y_history.append(adj_y)
+        if _is_tuple(adj_y0):
+            device = adj_y0[0].device
+        else:
+            device = adj_y0.device
+
+        adj_y = _clone(adj_y0)
+        adj_params = _clone(adj_params0)
+
+        c = torch.zeros(N + 1, dtype=torch.float64, device=device)
+        c[0] = 1
+        h_power = torch.pow(h, beta)
+        gamma_factor = math.gamma(2 - beta)
+
+        for j in range(1, N + 1):
+            c[j] = (1 - (1 + beta) / j) * c[j - 1]
+
+        adjy_history = [adj_y]
+
         for k in range(1, N):
             tn = tspan[k]
-            right = 0
+
+            # Initialize right term with correct structure
+            if _is_tuple(adj_y):
+                right = tuple(torch.zeros_like(comp) for comp in adj_y)
+            else:
+                right = 0
+
             for j in range(0, k):
-                right = (right + RLcoeffs(k, j, beta) * y_history[j])
+                coeff = RLcoeffs(k, j, beta)
+                # Handle tuple case
+                right = _add(right, _multiply(coeff, adjy_history[j]))
+
 
             y_ori = yhistory_ori[k]
-            func_eval, f_k, jp_params_k = func(tn, (y_ori, adj_y, adj_params))
-            adj_y = math.gamma(2 - beta) * f_k * torch.pow(h, beta) - right
+            func_eval, f_term, jp_params = func(tn, (y_ori, adj_y, adj_params))
 
-            y_history.append(adj_y)
+            f_h_term = _multiply(h_power * gamma_factor, f_term)
+            adj_y = _minus(f_h_term, right)
+            adjy_history.append(adj_y)
 
-            adj_params = adj_params + h * jp_params_k
+            adj_params = adj_params + h * jp_params
 
     return adj_y, adj_params
 
 
-def RLcoeffs(index_k, index_j, alpha):
-    """Calculates coefficients for the RL differintegral operator.
-
-    see Baleanu, D., Diethelm, K., Scalas, E., and Trujillo, J.J. (2012). Fractional
-        Calculus: Models and Numerical Methods. World Scientific.
-    """
-
-    if index_j == 0:
-        return ((index_k - 1) ** (1 - alpha) - (index_k + alpha - 1) * index_k ** -alpha)
-    elif index_j == index_k:
-        return 1
-    else:
-        return ((index_k - index_j + 1) ** (1 - alpha) + (index_k - index_j - 1) ** (1 - alpha) - 2 * (
-                    index_k - index_j) ** (1 - alpha))
 
 
 def ForwardProduct_Trap_w_History(func,y0,beta,tspan,**options):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
-        device = y0.device
-        c = torch.zeros(N + 1, dtype=torch.float64,device=device)
+
+        # Get device from y0 (handle both tensor and tuple cases)
+        if _is_tuple(y0):
+            device = y0[0].device
+        else:
+            device = y0.device
+
+        c = torch.zeros(N + 1, dtype=torch.float64, device=device)
         c[0] = 1
-        for j in range(1, N+1):
-            c[j] = (1 - (1+beta)/j) * c[j-1]
-        yn = y0.clone()
-        y_history = []
-        y_history.append(yn)
+
+        for j in range(1, N + 1):
+            c[j] = (1 - (1 + beta) / j) * c[j - 1]
+
+        yn = _clone(y0)
+        y_history = [yn]
+
         for k in range(1, N):
             tn = tspan[k]
-            right = 0
+
+            # Initialize right term with correct structure
+            if _is_tuple(y0):
+                right = tuple(torch.zeros_like(comp) for comp in y0)
+            else:
+                right = 0
+
             for j in range(0, k):
-                right = (right + RLcoeffs(k, j, beta) * y_history[j])
-            yn = math.gamma(2 - beta) * func(tn, yn) * torch.pow(h, beta) - right
+                coeff = RLcoeffs(k, j, beta)
+
+                # Handle tuple case
+                right = _add(right, _multiply(coeff, y_history[j]))
+
+            # Calculate gamma * f(tn, yn) * h^beta term
+            f_term = func(tn, yn)
+            gamma_factor = math.gamma(2 - beta)
+            h_power = torch.pow(h, beta)
+
+            f_h_term = _multiply(h_power * gamma_factor, f_term)
+            # Subtract right from f_h_term
+            yn = _minus(f_h_term, right)
             y_history.append(yn)
+
     return yn, y_history
 
 
@@ -429,46 +544,53 @@ def BackwardMixedOrde_o(func, y_aug, beta, tspan, yhistory_ori):
         h = torch.abs(h)
         y0, adj_y0, adj_params0 = y_aug  ### we will use yhistory_ori rather than compute y again
 
-        device = adj_y0.device
+        if _is_tuple(adj_y0):
+            device = adj_y0[0].device
+        else:
+            device = adj_y0.device
+
         gamma_beta = 1 / math.gamma(beta)
 
         if True:#yhistory_ori is None:
             fy_history = []
 
-        adj_y = adj_y0.clone()
-        adj_params = adj_params0.clone()
-        y = y0.clone()
+        adj_y = _clone(adj_y0)
+        adj_params = _clone(adj_params0)
+        y = _clone(y0)
 
         for k in range(N-1):
             tn = tspan[k]
 
 
-            func_eval, f_k, jp_params_k = func(tn, (y, adj_y, adj_params))
+            func_eval, vjp_y, vjp_params = func(tn, (y, adj_y, adj_params))
 
             if yhistory_ori is not None and k<N:
                 y = yhistory_ori[k+1]
             else:
+
+
                 fy_history.append(func_eval)
                 j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
                 b_j_k_1 = (fractional_pow(h, beta) / beta) * (
                         fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
 
-                sample_product = b_j_k_1[0] * fy_history[0]
-                b_all_k = torch.zeros_like(
-                    sample_product)  # Initialize accumulator with zeros of the same shape as the product
+                # Initialize accumulator with correct structure (tensor or tuple)
+                if _is_tuple(fy_history[0]):
+                    b_all_k = tuple(torch.zeros_like(f_i) for f_i in fy_history[0])
+                else:
+                    b_all_k = torch.zeros_like(fy_history[0])
+
                 # Loop through the range and accumulate results
                 for i in range(0, k + 1):
-                    b_all_k += b_j_k_1[i] * fy_history[i]
+                    b_all_k = _add(b_all_k, _multiply(b_j_k_1[i], fy_history[i]))
 
-                # temp_product = torch.stack([b_j_k_1[i] * fy_history[i] for i in range(0, k + 1)])
-                # b_all_k = torch.sum(temp_product, dim=0)
-                y = y0 + gamma_beta * b_all_k
+                # Final update step
+                weight_term = _multiply(gamma_beta, b_all_k)
+                y = _add(y0, weight_term)
 
 
-            # multiplie f_k with random tensor
-            # f_k = f_k * torch.rand(f_k.size(),device=f_k.device)
-            adj_y = adj_y + h * f_k
-            adj_params = adj_params + h * jp_params_k
+            adj_y = _add(adj_y, _multiply(h, vjp_y))
+            adj_params = adj_params + h * vjp_params
 
     del yhistory_ori, fy_history
     return adj_y, adj_params

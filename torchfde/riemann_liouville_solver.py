@@ -96,6 +96,8 @@ def Product_Trap(func, y0, beta, tspan, **options):
 
     c = torch.zeros(N + 1, dtype=torch.float64, device=device)
     c[0] = 1
+    h_power = torch.pow(h, beta)
+    gamma_factor = math.gamma(2 - beta)
 
     for j in range(1, N + 1):
         c[j] = (1 - (1 + beta) / j) * c[j - 1]
@@ -120,8 +122,6 @@ def Product_Trap(func, y0, beta, tspan, **options):
 
         # Calculate gamma * f(tn, yn) * h^beta term
         f_term = func(tn, yn)
-        gamma_factor = math.gamma(2 - beta)
-        h_power = torch.pow(h, beta)
 
         f_h_term = _multiply(h_power * gamma_factor, f_term)
         # Subtract right from f_h_term

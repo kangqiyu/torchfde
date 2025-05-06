@@ -152,3 +152,13 @@ def _clone(y):
     if _is_tuple(y):
         return tuple(y_i.clone() for y_i in y)
     return y.clone()
+
+class ReversedListView:
+    def __init__(self, original_list):
+        self.original = original_list
+
+    def __getitem__(self, i):
+        return self.original[-1 - i]
+
+    def __len__(self):
+        return len(self.original)

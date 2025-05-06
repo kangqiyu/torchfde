@@ -67,11 +67,12 @@ class LearnbleFDEINT(nn.Module):
         """
 
         # Check inputs
-        func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
+        # func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
+        tensor_input, func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
         if options is None:
             options = {}
         # Ensure y0 is a tensor
-
+        y0 = y0[0]
         device = y0.device
         batch_size, state_dim = y0.shape
 
