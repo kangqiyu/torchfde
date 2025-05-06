@@ -1,45 +1,61 @@
 import torch
 import math
+from .utils_fde import _is_tuple, _clone, _add, _multiply, _minus
 
-def GLmethod(func,y0,beta,tspan,**options):
-    """Use GL  method to integrate Riemann-Liouville equation
+
+def GLmethod(func, y0, beta, tspan, **options):
+    """Use GL method to integrate Riemann-Liouville equation
         D^beta y(t) = f(t,y)
         Args:
           beta: fractional exponent in the range (0,1)
-          f: callable(y,t) returning a numpy array of shape (d,)
-             Vector-valued function to define the right hand side of the system
-          y0: array of shape (d,) giving the initial state vector y(t==0)
+          f: callable(y,t) returning a tensor or tuple of tensors
+          y0: N-D Tensor or tuple of Tensors giving the initial state vector y(t==0)
           tspan (array): The sequence of time points for which to solve for y.
             These must be equally spaced, e.g. np.arange(0,10,0.005)
             tspan[0] is the intial time corresponding to the initial state y0.
         Returns:
-          y: array, with shape (len(tspan), len(y0))
-             With the initial value y0 in the first row
-        Raises:
-          FODEValueError
-        See also:
-          K. Diethelm et al. (2004) Detailed error analysis for a fractional Adams
-             method
-          C. Li and F. Zeng (2012) Finite Difference Methods for Fractional
-             Differential Equations
+          y: Tensor or tuple of Tensors with the same structure as y0
         """
     N = len(tspan)
     h = (tspan[N - 1] - tspan[0]) / (N - 1)
-    device = y0.device
-    c = torch.zeros(N + 1, dtype=torch.float64,device=device)
+
+    # Get device from y0 (handle both tensor and tuple cases)
+    if _is_tuple(y0):
+        device = y0[0].device
+    else:
+        device = y0.device
+
+    c = torch.zeros(N + 1, dtype=torch.float64, device=device)
     c[0] = 1
     for j in range(1, N + 1):
         c[j] = (1 - (1 + beta) / j) * c[j - 1]
-    yn = y0.clone()
-    y_history = []
-    y_history.append(yn)
+
+    yn = _clone(y0)
+    y_history = [yn]
+
     for k in range(1, N):
         tn = tspan[k]
-        right = 0
+
+        # Initialize right term with correct structure
+        if _is_tuple(y0):
+            right = tuple(torch.zeros_like(comp) for comp in y0)
+        else:
+            right = 0
+
         for j in range(1, k + 1):
-            right = (right + c[j] * y_history[k - j])
-        yn = func(tn, yn) * torch.pow(h, beta) - right
+            right = _add(right, _multiply(c[j], y_history[k - j]))
+
+        # Calculate f(tn, yn) * h^beta term
+        f_term = func(tn, yn)
+        h_power = torch.pow(h, beta)
+
+        f_h_term = _multiply(h_power, f_term)
+        # Subtract right from f_h_term
+        yn = _minus(f_h_term, right)
         y_history.append(yn)
+
+    del y_history
+
     return yn
 
 def RLcoeffs(index_k, index_j, alpha):
@@ -58,24 +74,59 @@ def RLcoeffs(index_k, index_j, alpha):
                     index_k - index_j) ** (1 - alpha))
 
 
-def Product_Trap(func,y0,beta,tspan,**options):
+
+def Product_Trap(func, y0, beta, tspan, **options):
+    """Use Product Trapezoidal method to integrate fractional equation
+    Args:
+      beta: fractional exponent in the range (0,1)
+      f: callable(y,t) returning a tensor or tuple of tensors
+      y0: N-D Tensor or tuple of Tensors giving the initial state vector y(t==0)
+      tspan (array): The sequence of time points for which to solve for y.
+    Returns:
+      y: Tensor or tuple of Tensors with the same structure as y0
+    """
     N = len(tspan)
     h = (tspan[N - 1] - tspan[0]) / (N - 1)
-    device = y0.device
-    c = torch.zeros(N + 1, dtype=torch.float64,device=device)
+
+    # Get device from y0 (handle both tensor and tuple cases)
+    if _is_tuple(y0):
+        device = y0[0].device
+    else:
+        device = y0.device
+
+    c = torch.zeros(N + 1, dtype=torch.float64, device=device)
     c[0] = 1
-    for j in range(1, N+1):
-        c[j] = (1 - (1+beta)/j) * c[j-1]
-    yn = y0.clone()
-    y_history = []
-    y_history.append(yn)
+    h_power = torch.pow(h, beta)
+    gamma_factor = math.gamma(2 - beta)
+
+    for j in range(1, N + 1):
+        c[j] = (1 - (1 + beta) / j) * c[j - 1]
+
+    yn = _clone(y0)
+    y_history = [yn]
+
     for k in range(1, N):
         tn = tspan[k]
-        right = 0
+
+        # Initialize right term with correct structure
+        if _is_tuple(y0):
+            right = tuple(torch.zeros_like(comp) for comp in y0)
+        else:
+            right = 0
+
         for j in range(0, k):
-            right = (right + RLcoeffs(k, j, beta) * y_history[j])
-        yn = math.gamma(2 - beta) * func(tn, yn) * torch.pow(h, beta) - right
+            coeff = RLcoeffs(k, j, beta)
+
+            # Handle tuple case
+            right = _add(right, _multiply(coeff, y_history[j]))
+
+        # Calculate gamma * f(tn, yn) * h^beta term
+        f_term = func(tn, yn)
+
+        f_h_term = _multiply(h_power * gamma_factor, f_term)
+        # Subtract right from f_h_term
+        yn = _minus(f_h_term, right)
         y_history.append(yn)
+
+    del y_history
     return yn
-
-

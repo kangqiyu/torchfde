@@ -2,7 +2,7 @@ import torch
 
 import warnings
 
-def _check_inputs(func, y0, t, step_size,method,beta, SOLVERS):
+def _check_inputs(func, y0, t, step_size, method, beta, SOLVERS):
 
 
 
@@ -14,15 +14,18 @@ def _check_inputs(func, y0, t, step_size,method,beta, SOLVERS):
     if method not in SOLVERS:
         raise ValueError('Invalid method "{}". Must be one of {}'.format(method,
                                                                          '{"' + '", "'.join(SOLVERS.keys()) + '"}.'))
-
-
-
+    if _is_tuple(y0):
+        device = y0[0].device
+    else:
+        device = y0.device
     # check t is a float tensor, if not  convert it to one
     if not isinstance(t, torch.Tensor):
-        t = torch.tensor(t, dtype=torch.float32, device=y0.device)
+            # check t is a float tensor, if not  convert it to one
+            t = torch.tensor(t, dtype=torch.float32, device=device)
         # print("t converted to tensor")
     else:
-        t = t.to(y0.device)
+        t = t.to(device)
+
     # check t is > 0 else raise error
     if not (t > 0).all():
         raise ValueError("t must be > 0")
@@ -33,10 +36,10 @@ def _check_inputs(func, y0, t, step_size,method,beta, SOLVERS):
 
     # check beta is a float tensor, if not  convert it to one
     if not isinstance(beta, torch.Tensor):
-        beta = torch.tensor(beta, dtype=torch.float32, device=y0.device)
+        beta = torch.tensor(beta, dtype=torch.float32, device=device)
         # print("beta converted to tensor")
     else:
-        beta = beta.to(y0.device)
+        beta = beta.to(device)
     # check beta is > 0 else raise error
     if not (beta > 0).all():
         raise ValueError("beta must be > 0")
@@ -46,10 +49,10 @@ def _check_inputs(func, y0, t, step_size,method,beta, SOLVERS):
 
     # check stepsize is a float tensor, if not  convert it to one
     if not isinstance(step_size, torch.Tensor):
-        step_size = torch.tensor(step_size, dtype=torch.float32, device=y0.device)
+        step_size = torch.tensor(step_size, dtype=torch.float32, device=device)
         # print("step_size converted to tensor")
     else:
-        step_size = step_size.to(y0.device)
+        step_size = step_size.to(device)
     # check step_size is > 0 else raise error
     if not (step_size > 0).all():
         raise ValueError("step_size must be > 0")
@@ -67,8 +70,17 @@ def _check_inputs(func, y0, t, step_size,method,beta, SOLVERS):
     # Generate tspan
     tspan = torch.linspace(0, t, num_steps)
 
+    tensor_input = False
+    if torch.is_tensor(y0):
+        tensor_input = True
+        y0 = (y0,)
+        _base_nontuple_func_ = func
+        func = lambda t, y: (_base_nontuple_func_(t, y[0]),)
+    assert isinstance(y0, tuple), 'y0 must be either a torch.Tensor or a tuple'
+    for y0_ in y0:
+        assert torch.is_tensor(y0_), 'each element must be a torch.Tensor but received {}'.format(type(y0_))
 
-    return func, y0, tspan, method, beta
+    return tensor_input, func, y0, tspan, method, beta
 
 
 def _check_timelike(name, timelike, can_grad):
@@ -109,3 +121,44 @@ def _flatten_convert_none_to_zeros(sequence, like_sequence):
     ]
     return torch.cat(flat) if len(flat) > 0 else torch.tensor([])
 
+def _is_tuple(x):
+    return isinstance(x, tuple)
+
+
+def _tuple_map(fn, *args):
+    """Apply fn to each tuple element."""
+    if _is_tuple(args[0]):
+        return tuple(fn(*[arg[i] for arg in args]) for i in range(len(args[0])))
+    return fn(*args)
+
+
+def _add(a, b):
+    if _is_tuple(a) and _is_tuple(b):
+        return tuple(a_i + b_i for a_i, b_i in zip(a, b))
+    return a + b
+
+def _minus(a, b):
+    if _is_tuple(a) and _is_tuple(b):
+        return tuple(a_i - b_i for a_i, b_i in zip(a, b))
+    return a - b
+
+def _multiply(a, b):
+    if _is_tuple(b):
+        return tuple(a * b_i for b_i in b)
+    return a * b
+
+
+def _clone(y):
+    if _is_tuple(y):
+        return tuple(y_i.clone() for y_i in y)
+    return y.clone()
+
+class ReversedListView:
+    def __init__(self, original_list):
+        self.original = original_list
+
+    def __getitem__(self, i):
+        return self.original[-1 - i]
+
+    def __len__(self):
+        return len(self.original)
