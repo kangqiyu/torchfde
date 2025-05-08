@@ -70,17 +70,27 @@ def _check_inputs(func, y0, t, step_size, method, beta, SOLVERS):
     # Generate tspan
     tspan = torch.linspace(0, t, num_steps)
 
-    tensor_input = False
+
+    shapes = None
+    is_tuple = not isinstance(y0, torch.Tensor)
+    if is_tuple:
+        assert isinstance(y0, tuple), 'y0 must be either a torch.Tensor or a tuple'
+        shapes = [y0_.shape for y0_ in y0]
+        y0 = torch.cat([y0_.reshape(-1) for y0_ in y0])
+        func = _TupleFunc(func, shapes)
+
+    assert torch.is_tensor(y0), 'should be a tensor'
     if torch.is_tensor(y0):
         tensor_input = True
-        y0 = (y0,)
-        _base_nontuple_func_ = func
-        func = lambda t, y: (_base_nontuple_func_(t, y[0]),)
+        y0 = (y0, )
+        func = _Tensor2TupleFunc(func)
     assert isinstance(y0, tuple), 'y0 must be either a torch.Tensor or a tuple'
     for y0_ in y0:
         assert torch.is_tensor(y0_), 'each element must be a torch.Tensor but received {}'.format(type(y0_))
 
-    return tensor_input, func, y0, tspan, method, beta
+
+
+    return shapes, tensor_input, func, y0, tspan, method, beta
 
 
 def _check_timelike(name, timelike, can_grad):
@@ -162,3 +172,35 @@ class ReversedListView:
 
     def __len__(self):
         return len(self.original)
+
+
+def _flat_to_shape(tensor, length, shapes):
+    tensor_list = []
+    total = 0
+    for shape in shapes:
+        next_total = total + shape.numel()
+        # It's important that this be view((...)), not view(...). Else when length=(), shape=() it fails.
+        tensor_list.append(tensor[..., total:next_total].view((*length, *shape)))
+        total = next_total
+    return tuple(tensor_list)
+
+class _TupleFunc(torch.nn.Module):
+    def __init__(self, base_func, shapes):
+        super(_TupleFunc, self).__init__()
+        self.base_func = base_func
+        self.shapes = shapes
+
+    def forward(self, t, y):
+        f = self.base_func(t, _flat_to_shape(y, (), self.shapes))
+        return torch.cat([f_.reshape(-1) for f_ in f])
+
+class _Tensor2TupleFunc(torch.nn.Module):
+    # func = lambda t, y: (_base_nontuple_func_(t, y[0]),)
+    def __init__(self, base_func):
+        super(_Tensor2TupleFunc, self).__init__()
+        self.base_func = base_func
+
+    def forward(self, t, y):
+        assert len(y) == 1, 'should be a length one tuple'
+        f = self.base_func(t, y[0])
+        return (f, )

@@ -1,4 +1,4 @@
-from .utils_fde import _check_inputs
+from .utils_fde import _check_inputs, _flat_to_shape
 from .explicit_solver import Predictor,Predictor_Corrector
 from .implicit_solver import Implicit_l1
 from .riemann_liouville_solver import GLmethod,Product_Trap
@@ -41,12 +41,14 @@ def fdeint(func,y0,beta,t,step_size,method,options=None):
       Raises:
           ValueError: if an invalid `method` is provided.
       """
-    tensor_input, func, y0, tspan, method, beta= _check_inputs(func, y0, t,step_size,method,beta, SOLVERS)
+    shapes, tensor_input, func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
     if options is None:
         options = {}
-    solution = SOLVERS[method](func=func, y0=y0, beta=beta, tspan=tspan,**options)
+    solution = SOLVERS[method](func=func, y0=y0, beta=beta, tspan=tspan, **options)
 
-    if tensor_input:
-        solution = solution[0]
+    assert tensor_input, 'tensor_input should be true since we flatten the input to be tensor in this version'
+    solution = solution[0]
+    if shapes is not None:
+        solution = _flat_to_shape(solution, (), shapes)
 
     return solution

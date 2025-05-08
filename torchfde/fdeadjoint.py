@@ -1,7 +1,7 @@
 import torch
 import math
 import torch.nn as nn
-from .utils_fde import _flatten, _flatten_convert_none_to_zeros,_check_inputs
+from .utils_fde import _flatten, _flatten_convert_none_to_zeros,_check_inputs, _flat_to_shape
 from .utils_fde import _is_tuple, _clone, _add, _multiply, _minus, ReversedListView
 # from . import fdeint
 # from .explicit_solver import Predictor,Predictor_Corrector
@@ -128,17 +128,20 @@ def fdeint_adjoint(func,y0,beta,t,step_size,method,options=None):
         y0 = (y0,)
         func = TupleFunc(func)
 
-    _, _, y0, tspan, method, beta= _check_inputs(func, y0, t,step_size,method,beta, SOLVERS)
+    shapes, tensor_input, func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
 
     if options is None:
         options = {}
 
     flat_params = _flatten(func.parameters())
-    ys = FDEAdjointMethod.apply(*y0, func, beta, tspan, flat_params, method, options)
+    solution = FDEAdjointMethod.apply(*y0, func, beta, tspan, flat_params, method, options)
 
-    if tensor_input:
-        ys = ys[0]
-    return ys
+    assert tensor_input, 'tensor_input should be true since we flatten the input to be tensor in this version'
+    solution = solution[0]
+    if shapes is not None:
+        solution = _flat_to_shape(solution, (), shapes)
+
+    return solution
 
 
 def fractional_pow(base, exponent):
