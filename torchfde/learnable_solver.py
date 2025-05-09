@@ -116,8 +116,8 @@ class LearnbleFDEINT(nn.Module):
                 t_history = tspan[:k]
 
                 # Create history tensor by stacking list elements
-                y_history_tensor = torch.stack(y_list, dim=2)  # [batch_size, state_dim, k]
-                f_history_tensor = torch.stack(f_list, dim=2)  # [batch_size, state_dim, k]
+                y_history_tensor = torch.stack(y_list, dim=-1)  # [batch_size, state_dim, k]
+                f_history_tensor = torch.stack(f_list, dim=-1)  # [batch_size, state_dim, k]
 
                 options['beta'] = beta
                 options['h'] = h
@@ -181,10 +181,10 @@ class AttentionKernel_simple(nn.Module):
         Forward pass for the attention kernel.
 
         Args:
-            t_current: Current time points [batch_size, 1]
-            t_history: History of time points [batch_size, seq_len, 1]
+            t_current: Current time points [1]
+            t_history: History of time points [seq_len, 1]
             y_current: Current state [batch_size, state_dim]
-            y_history: History of states [batch_size, seq_len, state_dim]
+            y_history: History of states [batch_size, state_dim， seq_len]
             mask: Optional mask tensor of shape [batch_size, 1, seq_len]
 
         Returns:
