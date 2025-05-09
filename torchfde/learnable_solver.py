@@ -3,7 +3,7 @@ import math
 from typing import Callable, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
-from .utils_fde import _check_inputs
+from .utils_fde import _check_inputs_tensorinput
 from .explicit_solver import fractional_pow
 
 
@@ -12,14 +12,15 @@ class LearnbleFDEINT(nn.Module):
     Neural solver for integral equations using learnable attention mechanisms.
     """
 
-    def __init__(self, state_dim: int, hidden_dim: int = 64, dropout: float = 0.1):
+    def __init__(self, state_dim: int, hidden_dim: int = 64, dropout: float = 0.1, method: str = 'AttentionKernel_simple'):
         super(LearnbleFDEINT, self).__init__()
         self.state_dim = state_dim
 
         # Attention kernel for computing weights
         self.attention_kernel = None
 
-    def initialize_attention_kernel(self, method, state_dim, device, hidden_dim=64, dropout=0.1):
+        # Attention kernel for computing weights
+        self.attention_kernel = None
         """
         Initialize the neural solver for later use.
         """
@@ -28,9 +29,8 @@ class LearnbleFDEINT(nn.Module):
                 state_dim=state_dim,
                 hidden_dim=hidden_dim,
                 dropout=dropout
-            ).to(device)
+            )
         elif method == "AttentionKernel_simple":
-
             self.attention_kernel = AttentionKernel_simple(
                 state_dim=state_dim,
                 hidden_dim=hidden_dim,
@@ -41,7 +41,7 @@ class LearnbleFDEINT(nn.Module):
                 state_dim=state_dim,
                 hidden_dim=hidden_dim,
                 dropout=dropout
-            ).to(device)
+            )
         else:
             raise ValueError("No learnable solver specified. Please specify a way to compute the kernel.")
 
@@ -67,18 +67,17 @@ class LearnbleFDEINT(nn.Module):
         """
 
         # Check inputs
-        # func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
-        tensor_input, func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
+        func, y0, tspan, method, beta = _check_inputs_tensorinput(func, y0, t, step_size, method, beta, SOLVERS)
         if options is None:
             options = {}
         # Ensure y0 is a tensor
-        y0 = y0[0]
+
         device = y0.device
         batch_size, state_dim = y0.shape
 
-        # Handle the learnable solver differently
-        if self.attention_kernel is None:
-            self.initialize_attention_kernel(method, state_dim, device, hidden_dim=64, dropout=0.1)
+        # # Handle the learnable solver differently
+        # if self.attention_kernel is None:
+        #     self.initialize_attention_kernel(method, state_dim, device, hidden_dim=64, dropout=0.1)
 
         # Convert tspan to tensor if it's not already
         if not isinstance(tspan, torch.Tensor):
@@ -255,6 +254,8 @@ class AttentionKernel(nn.Module):
         batch_size, state_dim, seq_len = y_history.shape
         device = y_current.device
 
+
+        # print(self.W_q.weight)
         # Project current state to query
         q = self.W_q(y_current).unsqueeze(1)  # [batch_size, 1, hidden_dim]
 

@@ -204,3 +204,72 @@ class _Tensor2TupleFunc(torch.nn.Module):
         assert len(y) == 1, 'should be a length one tuple'
         f = self.base_func(t, y[0])
         return (f, )
+
+
+def _check_inputs_tensorinput(func, y0, t, step_size, method, beta, SOLVERS):
+
+
+
+
+
+
+
+
+    if method not in SOLVERS:
+        raise ValueError('Invalid method "{}". Must be one of {}'.format(method,
+                                                                         '{"' + '", "'.join(SOLVERS.keys()) + '"}.'))
+
+
+
+    # check t is a float tensor, if not  convert it to one
+    if not isinstance(t, torch.Tensor):
+        t = torch.tensor(t, dtype=torch.float32, device=y0.device)
+        # print("t converted to tensor")
+    else:
+        t = t.to(y0.device)
+    # check t is > 0 else raise error
+    if not (t > 0).all():
+        raise ValueError("t must be > 0")
+    # ~Backward compatibility
+
+    # # Add perturb argument to func.
+    # func = _PerturbFunc(func)
+
+    # check beta is a float tensor, if not  convert it to one
+    if not isinstance(beta, torch.Tensor):
+        beta = torch.tensor(beta, dtype=torch.float32, device=y0.device)
+        # print("beta converted to tensor")
+    else:
+        beta = beta.to(y0.device)
+    # check beta is > 0 else raise error
+    if not (beta > 0).all():
+        raise ValueError("beta must be > 0")
+    # check beta is <= 1 else raise warning
+    if not (beta <= 1).all():
+        warnings.warn("beta should be <= 1 for the initial value problem")
+
+    # check stepsize is a float tensor, if not  convert it to one
+    if not isinstance(step_size, torch.Tensor):
+        step_size = torch.tensor(step_size, dtype=torch.float32, device=y0.device)
+        # print("step_size converted to tensor")
+    else:
+        step_size = step_size.to(y0.device)
+    # check step_size is > 0 else raise error
+    if not (step_size > 0).all():
+        raise ValueError("step_size must be > 0")
+
+    # check step_size is <= t else raise error
+    if not (step_size < t).all():
+        raise ValueError("step_size must be < t")
+
+    # print(t,step_size)
+
+
+    # tspan = torch.arange(0,t,step_size)
+
+    num_steps = int((t - 0) / step_size) + 1  # plus one to include 't' itself
+    # Generate tspan
+    tspan = torch.linspace(0, t, num_steps)
+
+
+    return func, y0, tspan, method, beta
