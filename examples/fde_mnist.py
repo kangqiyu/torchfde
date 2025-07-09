@@ -33,10 +33,10 @@ parser.add_argument('--method', type=str, choices=
                             ], default='predictor-f')
 
 # parameters for the FDE solver
-parser.add_argument('--adjoint', type=eval, default=False, choices=[True, False])
+parser.add_argument('--adjoint', type=eval, default=True, choices=[True, False])
 parser.add_argument('--step_size', type=float, default=0.1)
 parser.add_argument('--beta', type=float, default=0.5)
-parser.add_argument('--T', type=float, default=20)
+parser.add_argument('--T', type=float, default=2)
 
 
 args = parser.parse_args()

@@ -2,12 +2,14 @@ from .utils_fde import _check_inputs, _flat_to_shape
 from .explicit_solver import Predictor,Predictor_Corrector
 from .implicit_solver import Implicit_l1
 from .riemann_liouville_solver import GLmethod,Product_Trap
+from . import config
+import torch
+
 SOLVERS = {"predictor":Predictor,
           "corrector":Predictor_Corrector,
            "implicitl1":Implicit_l1,
            "gl":GLmethod,
            "trap":Product_Trap
-
 }
 
 def fdeint(func,y0,beta,t,step_size,method,options=None):
@@ -46,9 +48,28 @@ def fdeint(func,y0,beta,t,step_size,method,options=None):
         options = {}
     solution = SOLVERS[method](func=func, y0=y0, beta=beta, tspan=tspan, **options)
 
-    assert tensor_input, 'tensor_input should be true since we flatten the input to be tensor in this version'
-    solution = solution[0]
-    if shapes is not None:
-        solution = _flat_to_shape(solution, (), shapes)
+    # Post-process solution based on tensor mode and input type
+    if config.TENSOR_MODE == 'concat':
+        # CONCAT MODE: Solution needs to be reshaped back to original structure
+        if not tensor_input:
+            # Case 1: Original input was tuple - reshape flattened solution back to tuple of original shapes
+             #asset shapes is not None
+            assert shapes is not None, 'for tuple, we need to provide shapes'
+            solution = solution[0]
+            solution = _flat_to_shape(solution, (), shapes)
+        else:
+            # Case 2: Original input was tensor - just extract the solution
+            solution = solution[0]
+    else:
+        # NON-CONCAT MODE: Only extract solution if original input was a single tensor
+        if tensor_input:
+            solution = solution[0]
+        # (If input was tuple, solution remains as-is)
+
+    # Validate output type matches input type
+    if tensor_input:
+        assert torch.is_tensor(solution)
+    else:
+        assert isinstance(solution, tuple)
 
     return solution

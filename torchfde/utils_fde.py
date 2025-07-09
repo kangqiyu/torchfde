@@ -1,16 +1,9 @@
 import torch
-
 import warnings
+from . import config
+
 
 def _check_inputs(func, y0, t, step_size, method, beta, SOLVERS):
-
-
-
-
-
-
-
-
     if method not in SOLVERS:
         raise ValueError('Invalid method "{}". Must be one of {}'.format(method,
                                                                          '{"' + '", "'.join(SOLVERS.keys()) + '"}.'))
@@ -62,8 +55,6 @@ def _check_inputs(func, y0, t, step_size, method, beta, SOLVERS):
         raise ValueError("step_size must be < t")
 
     # print(t,step_size)
-
-
     # tspan = torch.arange(0,t,step_size)
 
     num_steps = int((t - 0) / step_size) + 1  # plus one to include 't' itself
@@ -91,6 +82,44 @@ def _check_inputs(func, y0, t, step_size, method, beta, SOLVERS):
 
 
     return shapes, tensor_input, func, y0, tspan, method, beta
+
+    #
+    # # Initialize tracking variables
+    # shapes = None
+    # tensor_input = False
+    #
+    # # Handle different tensor modes
+    # if config.TENSOR_MODE == 'concat':
+    #     # CONCAT MODE: Flatten and concatenate tuple elements into a single tensor
+    #     is_tuple = not isinstance(y0, torch.Tensor)
+    #     if is_tuple:
+    #         # Case 1: y0 is tuple - flatten each element and concatenate
+    #         assert isinstance(y0, tuple), 'y0 must be either a torch.Tensor or a tuple'
+    #         shapes = [y0_.shape for y0_ in y0]
+    #         y0 = torch.cat([y0_.reshape(-1) for y0_ in y0])
+    #         func = _TupleFunc(func, shapes)
+    #     else:
+    #         # Case 2: y0 is already a tensor - just mark it
+    #         assert isinstance(y0, torch.Tensor), 'y0 must be either a torch.Tensor or a tuple'
+    #         tensor_input = True
+    #     assert torch.is_tensor(y0), 'should be a (concatenate) tensor'
+    # else:
+    #     # NON-CONCAT MODE: Keep original structure, just check if tensor
+    #     if torch.is_tensor(y0):
+    #         tensor_input = True
+    #
+    # # Convert single tensors to tuple format for unified processing
+    # if torch.is_tensor(y0):
+    #     y0 = (y0, )
+    #     func = _Tensor2TupleFunc(func) # Wrap func to handle tensor-to-tuple conversion
+    #
+    # # Final validation: ensure y0 is a tuple of tensors
+    # assert isinstance(y0, tuple), 'y0 must be a tuple'
+    #
+    # for y0_ in y0:
+    #     assert torch.is_tensor(y0_), 'each element must be a torch.Tensor but received {}'.format(type(y0_))
+    #
+    # return shapes, tensor_input, func, y0, tspan, method, beta
 
 
 def _check_timelike(name, timelike, can_grad):
@@ -207,19 +236,9 @@ class _Tensor2TupleFunc(torch.nn.Module):
 
 
 def _check_inputs_tensorinput(func, y0, t, step_size, method, beta, SOLVERS):
-
-
-
-
-
-
-
-
     if method not in SOLVERS:
         raise ValueError('Invalid method "{}". Must be one of {}'.format(method,
                                                                          '{"' + '", "'.join(SOLVERS.keys()) + '"}.'))
-
-
 
     # check t is a float tensor, if not  convert it to one
     if not isinstance(t, torch.Tensor):
@@ -263,13 +282,10 @@ def _check_inputs_tensorinput(func, y0, t, step_size, method, beta, SOLVERS):
         raise ValueError("step_size must be < t")
 
     # print(t,step_size)
-
-
     # tspan = torch.arange(0,t,step_size)
 
     num_steps = int((t - 0) / step_size) + 1  # plus one to include 't' itself
     # Generate tspan
     tspan = torch.linspace(0, t, num_steps)
-
 
     return func, y0, tspan, method, beta
