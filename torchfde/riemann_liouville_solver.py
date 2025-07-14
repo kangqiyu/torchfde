@@ -1,7 +1,7 @@
 import torch
 import math
 from .utils_fde import _is_tuple, _clone, _add, _multiply, _minus
-
+from . import config
 
 def GLmethod(func, y0, beta, tspan, **options):
     """Use GL method to integrate Riemann-Liouville equation
@@ -55,7 +55,6 @@ def GLmethod(func, y0, beta, tspan, **options):
         y_history.append(yn)
 
     del y_history
-
     return yn
 
 def RLcoeffs(index_k, index_j, alpha):
@@ -88,19 +87,8 @@ def Product_Trap(func, y0, beta, tspan, **options):
     N = len(tspan)
     h = (tspan[N - 1] - tspan[0]) / (N - 1)
 
-    # Get device from y0 (handle both tensor and tuple cases)
-    if _is_tuple(y0):
-        device = y0[0].device
-    else:
-        device = y0.device
-
-    c = torch.zeros(N + 1, dtype=torch.float64, device=device)
-    c[0] = 1
     h_power = torch.pow(h, beta)
     gamma_factor = math.gamma(2 - beta)
-
-    for j in range(1, N + 1):
-        c[j] = (1 - (1 + beta) / j) * c[j - 1]
 
     yn = _clone(y0)
     y_history = [yn]
@@ -116,7 +104,6 @@ def Product_Trap(func, y0, beta, tspan, **options):
 
         for j in range(0, k):
             coeff = RLcoeffs(k, j, beta)
-
             # Handle tuple case
             right = _add(right, _multiply(coeff, y_history[j]))
 
