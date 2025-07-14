@@ -1,13 +1,13 @@
 import torch
 import math
 import torch.nn as nn
-from .utils_fde import _flatten, _flatten_convert_none_to_zeros,_check_inputs
+from .utils_fde import _flatten, _flatten_convert_none_to_zeros,_check_inputs, _flat_to_shape
 from .utils_fde import _is_tuple, _clone, _add, _multiply, _minus, ReversedListView
 # from . import fdeint
 # from .explicit_solver import Predictor,Predictor_Corrector
 # from .implicit_solver import Implicit_l1
 from .riemann_liouville_solver import RLcoeffs
-# import pdb
+from . import config
 
 
 class FDEAdjointMethod(torch.autograd.Function):
@@ -114,6 +114,7 @@ def fdeint_adjoint(func,y0,beta,t,step_size,method,options=None):
         raise ValueError('func is required to be an instance of nn.Module.')
 
     tensor_input = False
+    # Wrap single tensor inputs in a tuple for unified processing
     if torch.is_tensor(y0):
         class TupleFunc(nn.Module):
 
@@ -125,20 +126,40 @@ def fdeint_adjoint(func,y0,beta,t,step_size,method,options=None):
                 return (self.base_func(t, y[0]),)
 
         tensor_input = True
-        y0 = (y0,)
-        func = TupleFunc(func)
+        y0 = (y0, ) # Convert tensor to tuple
+        func = TupleFunc(func) # Wrap function to handle tensor input/output
 
-    _, _, y0, tspan, method, beta= _check_inputs(func, y0, t,step_size,method,beta, SOLVERS)
+    # Validate inputs and prepare for solving
+    shapes, _, func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
 
     if options is None:
         options = {}
 
+    # Solve using adjoint method
     flat_params = _flatten(func.parameters())
-    ys = FDEAdjointMethod.apply(*y0, func, beta, tspan, flat_params, method, options)
+    solution = FDEAdjointMethod.apply(*y0, func, beta, tspan, flat_params, method, options)
 
+    # Post-process solution based on tensor mode
+    if config.TENSOR_MODE == 'concat':
+        # CONCAT MODE: Always reshape the flattened solution back to original structure
+        # Note: In adjoint method, inputs are always flattened/concatenated regardless of original type
+        assert shapes is not None, 'for tuple, we need to provide shapes'
+        solution = solution[0] # Extract from solver output
+        solution = _flat_to_shape(solution, (), shapes) # Reshape to original structure
+        if tensor_input:
+            solution = solution[0] # If original input was a tensor, extract it from the tuple
+    else:
+        # NON-CONCAT MODE: Only unwrap if original input was a tensor
+        if tensor_input:
+            solution = solution[0]
+
+    # Validate output type matches original input type
     if tensor_input:
-        ys = ys[0]
-    return ys
+        assert torch.is_tensor(solution)
+    else:
+        assert isinstance(solution, tuple)
+
+    return solution
 
 
 def fractional_pow(base, exponent):

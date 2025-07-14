@@ -30,13 +30,13 @@ parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--method', type=str, choices=
                             ['predictor-f','predictor-o', 'gl-f', 'gl-o', 'trap-f', 'trap-o', #for adjoint method
                             'predictor','corrector', 'implicitl1', 'gl', 'trap' # for direct method
-                            ], default='corrector')
+                            ], default='trap-f')
 
 # parameters for the FDE solver
-parser.add_argument('--adjoint', type=eval, default=False, choices=[True, False])
+parser.add_argument('--adjoint', type=eval, default=True, choices=[True, False])
 parser.add_argument('--step_size', type=float, default=0.1)
 parser.add_argument('--beta', type=float, default=0.5)
-parser.add_argument('--T', type=float, default=20)
+parser.add_argument('--T', type=float, default=2)
 
 
 args = parser.parse_args()

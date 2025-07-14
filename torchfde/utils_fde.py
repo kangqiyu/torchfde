@@ -1,16 +1,9 @@
 import torch
-
 import warnings
+from . import config
+
 
 def _check_inputs(func, y0, t, step_size, method, beta, SOLVERS):
-
-
-
-
-
-
-
-
     if method not in SOLVERS:
         raise ValueError('Invalid method "{}". Must be one of {}'.format(method,
                                                                          '{"' + '", "'.join(SOLVERS.keys()) + '"}.'))
@@ -62,25 +55,48 @@ def _check_inputs(func, y0, t, step_size, method, beta, SOLVERS):
         raise ValueError("step_size must be < t")
 
     # print(t,step_size)
-
-
     # tspan = torch.arange(0,t,step_size)
 
     num_steps = int((t - 0) / step_size) + 1  # plus one to include 't' itself
     # Generate tspan
     tspan = torch.linspace(0, t, num_steps)
 
+    # Initialize tracking variables
+    shapes = None
     tensor_input = False
+
+    # Handle different tensor modes
+    if config.TENSOR_MODE == 'concat':
+        # CONCAT MODE: Flatten and concatenate tuple elements into a single tensor
+        is_tuple = not isinstance(y0, torch.Tensor)
+        if is_tuple:
+            # Case 1: y0 is tuple - flatten each element and concatenate
+            assert isinstance(y0, tuple), 'y0 must be either a torch.Tensor or a tuple'
+            shapes = [y0_.shape for y0_ in y0]
+            y0 = torch.cat([y0_.reshape(-1) for y0_ in y0])
+            func = _TupleFunc(func, shapes)
+        else:
+            # Case 2: y0 is already a tensor - just mark it
+            assert isinstance(y0, torch.Tensor), 'y0 must be either a torch.Tensor or a tuple'
+            tensor_input = True
+        assert torch.is_tensor(y0), 'should be a (concatenate) tensor'
+    else:
+        # NON-CONCAT MODE: Keep original structure, just check if tensor
+        if torch.is_tensor(y0):
+            tensor_input = True
+
+    # Convert single tensors to tuple format for unified processing
     if torch.is_tensor(y0):
-        tensor_input = True
-        y0 = (y0,)
-        _base_nontuple_func_ = func
-        func = lambda t, y: (_base_nontuple_func_(t, y[0]),)
-    assert isinstance(y0, tuple), 'y0 must be either a torch.Tensor or a tuple'
+        y0 = (y0, )
+        func = _Tensor2TupleFunc(func) # Wrap func to handle tensor-to-tuple conversion
+
+    # Final validation: ensure y0 is a tuple of tensors
+    assert isinstance(y0, tuple), 'y0 must be a tuple'
+
     for y0_ in y0:
         assert torch.is_tensor(y0_), 'each element must be a torch.Tensor but received {}'.format(type(y0_))
 
-    return tensor_input, func, y0, tspan, method, beta
+    return shapes, tensor_input, func, y0, tspan, method, beta
 
 
 def _check_timelike(name, timelike, can_grad):
@@ -162,3 +178,91 @@ class ReversedListView:
 
     def __len__(self):
         return len(self.original)
+
+
+def _flat_to_shape(tensor, length, shapes):
+    tensor_list = []
+    total = 0
+    for shape in shapes:
+        next_total = total + shape.numel()
+        # It's important that this be view((...)), not view(...). Else when length=(), shape=() it fails.
+        tensor_list.append(tensor[..., total:next_total].view((*length, *shape)))
+        total = next_total
+    return tuple(tensor_list)
+
+class _TupleFunc(torch.nn.Module):
+    def __init__(self, base_func, shapes):
+        super(_TupleFunc, self).__init__()
+        self.base_func = base_func
+        self.shapes = shapes
+
+    def forward(self, t, y):
+        f = self.base_func(t, _flat_to_shape(y, (), self.shapes))
+        return torch.cat([f_.reshape(-1) for f_ in f])
+
+class _Tensor2TupleFunc(torch.nn.Module):
+    # func = lambda t, y: (_base_nontuple_func_(t, y[0]),)
+    def __init__(self, base_func):
+        super(_Tensor2TupleFunc, self).__init__()
+        self.base_func = base_func
+
+    def forward(self, t, y):
+        assert len(y) == 1, 'should be a length one tuple'
+        f = self.base_func(t, y[0])
+        return (f, )
+
+
+def _check_inputs_tensorinput(func, y0, t, step_size, method, beta, SOLVERS):
+    if method not in SOLVERS:
+        raise ValueError('Invalid method "{}". Must be one of {}'.format(method,
+                                                                         '{"' + '", "'.join(SOLVERS.keys()) + '"}.'))
+
+    # check t is a float tensor, if not  convert it to one
+    if not isinstance(t, torch.Tensor):
+        t = torch.tensor(t, dtype=torch.float32, device=y0.device)
+        # print("t converted to tensor")
+    else:
+        t = t.to(y0.device)
+    # check t is > 0 else raise error
+    if not (t > 0).all():
+        raise ValueError("t must be > 0")
+    # ~Backward compatibility
+
+    # # Add perturb argument to func.
+    # func = _PerturbFunc(func)
+
+    # check beta is a float tensor, if not  convert it to one
+    if not isinstance(beta, torch.Tensor):
+        beta = torch.tensor(beta, dtype=torch.float32, device=y0.device)
+        # print("beta converted to tensor")
+    else:
+        beta = beta.to(y0.device)
+    # check beta is > 0 else raise error
+    if not (beta > 0).all():
+        raise ValueError("beta must be > 0")
+    # check beta is <= 1 else raise warning
+    if not (beta <= 1).all():
+        warnings.warn("beta should be <= 1 for the initial value problem")
+
+    # check stepsize is a float tensor, if not  convert it to one
+    if not isinstance(step_size, torch.Tensor):
+        step_size = torch.tensor(step_size, dtype=torch.float32, device=y0.device)
+        # print("step_size converted to tensor")
+    else:
+        step_size = step_size.to(y0.device)
+    # check step_size is > 0 else raise error
+    if not (step_size > 0).all():
+        raise ValueError("step_size must be > 0")
+
+    # check step_size is <= t else raise error
+    if not (step_size < t).all():
+        raise ValueError("step_size must be < t")
+
+    # print(t,step_size)
+    # tspan = torch.arange(0,t,step_size)
+
+    num_steps = int((t - 0) / step_size) + 1  # plus one to include 't' itself
+    # Generate tspan
+    tspan = torch.linspace(0, t, num_steps)
+
+    return func, y0, tspan, method, beta
