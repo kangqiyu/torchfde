@@ -6,7 +6,7 @@ import math
 # Tensor handling mode: 'concat' or 'loop'
 # TENSOR_MODE = 'concat'
 TENSOR_MODE = 'loop'
-
+#
 """
 When the input consists of multiple tensors (e.g., tuple of tensors), this setting
 determines the computational approach:
