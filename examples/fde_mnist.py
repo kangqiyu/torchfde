@@ -340,9 +340,9 @@ if __name__ == '__main__':
     
     best_acc = 0
     print(f"beta={args.beta:.2f}, T={args.T:.1f}, step_size={args.step_size:.2f}, method='{args.method}'")
-    
+
+    start_time = time.time()
     for itr in range(args.nepochs * batches_per_epoch):
-        
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr_fn(itr)
 
@@ -357,8 +357,12 @@ if __name__ == '__main__':
         optimizer.step()
 
         if itr % batches_per_epoch == 0 and itr > 0:
+            train_time = time.time()
+            print('train_time', train_time - start_time)
+
             with torch.no_grad():
                 train_acc = accuracy(model, train_eval_loader)
                 val_acc = accuracy(model, test_loader)
 
                 print("Epoch {:04d} |Train Acc  {:.4f}| Test Acc {:.4f}".format(itr // batches_per_epoch, train_acc, val_acc))
+            start_time = time.time()

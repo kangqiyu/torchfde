@@ -25,7 +25,7 @@ def Predictor(func, y0, beta, tspan, **options):
     h = (tspan[-1] - tspan[0]) / (N - 1)
     gamma_beta = 1 / math.gamma(beta)
     fhistory = []
-
+    h_beta_over_beta = torch.pow(h, beta) / beta
     # Get device from y0 (handle both tensor and tuple cases)
     if _is_tuple(y0):
         device = y0[0].device
@@ -47,8 +47,7 @@ def Predictor(func, y0, beta, tspan, **options):
         memory_k = max(0, k - memory)
 
         j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
-        b_j_k_1 = (fractional_pow(h, beta) / beta) * (
-                    fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
+        b_j_k_1 = h_beta_over_beta * (torch.pow(k + 1 - j_vals, beta) - torch.pow(k - j_vals, beta))
 
         # Initialize accumulator with correct structure (tensor or tuple)
         if _is_tuple(fhistory[memory_k]):
