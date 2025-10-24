@@ -10,102 +10,6 @@ from .riemann_liouville_solver import RLcoeffs
 from . import config
 
 
-class FDEAdjointMethod(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, *args):
-        assert len(args) >= 7, 'Internal error: all arguments required.'
-        y0, func, beta, tspan, flat_params, method, options = \
-            args[:-6], args[-6], args[-5], args[-4], args[-3], args[-2], args[-1]
-        y0 = tuple(y0)
-        ctx.func = func
-        ctx.beta = beta
-        ctx.method = method
-
-        with torch.no_grad():
-            ans, yhistory = SOLVERS[method](func=func, y0=y0, beta=beta, tspan=tspan,**options)
-
-        if any(t.requires_grad for t in [*y0, *flat_params]):
-            ctx.save_for_backward(tspan, flat_params, *ans)
-            ctx.yhistory = yhistory
-        else:
-            del yhistory
-
-        return ans
-
-    @staticmethod
-    def backward(ctx, *grad_output):
-        tspan, flat_params, *ans = ctx.saved_tensors
-        yhistory = ctx.yhistory
-        ans = tuple(ans)
-        # yhistory = yhistory_#.clone().detach().requires_grad_(True)
-
-        func = ctx.func
-        beta = ctx.beta
-        method = ctx.method
-        f_params = tuple(func.parameters())
-        n_tensors = len(ans)
-
-        def augmented_dynamics(t, y_aug):
-            y, adj_y, _ = y_aug
-
-            with torch.set_grad_enabled(True):
-                y = tuple(y_.detach().requires_grad_(True) for y_ in y)
-                func_eval = func(t, y)
-                vjp_y_and_params = torch.autograd.grad(
-                    func_eval, y + f_params,
-                    tuple(adj_y_ for adj_y_ in adj_y), allow_unused=True, retain_graph=True
-                )
-
-            vjp_y = vjp_y_and_params[:n_tensors]
-            vjp_params = vjp_y_and_params[n_tensors:]
-
-            # autograd.grad returns None if no gradient, set to zero.
-            vjp_y = tuple(torch.zeros_like(y_) if vjp_y_ is None else vjp_y_ for vjp_y_, y_ in zip(vjp_y, y))
-            vjp_params = _flatten_convert_none_to_zeros(vjp_params, f_params)
-
-            if len(f_params) == 0:
-                vjp_params = torch.tensor(0.).to(vjp_y[0])
-            return (func_eval, vjp_y, vjp_params)  ## return (tuple, tuple, vector)
-
-        tspan_flip = tspan.flip(0)
-
-        if yhistory is not None:
-            yhistory_flip = ReversedListView(yhistory)
-        else:
-            yhistory_flip = None
-
-        with torch.no_grad():
-            adj_y = grad_output
-            adj_params = torch.zeros_like(flat_params)
-
-            if adj_params.numel() == 0:
-                adj_params = torch.tensor(0.).to(adj_y[0])
-
-            aug_y0 = (ans, adj_y, adj_params)
-
-            if method == 'predictor-f':
-                backwardmethod = BackwardMixedOrderPredictor_f
-            elif method == 'predictor-o':
-                backwardmethod = BackwardMixedOrde_o
-            elif method == 'gl-f':
-                backwardmethod = BackwardMixedOrderGLmethod_f
-            elif method == 'gl-o':
-                backwardmethod = BackwardMixedOrde_o#mixOrderGLmethod_o
-            elif method == 'trap-f':
-                backwardmethod = BackwardMixedOrderTrap_f
-            elif method == 'trap-o':
-                backwardmethod = BackwardMixedOrde_o
-
-            adj_y, adj_params = backwardmethod(
-                augmented_dynamics, aug_y0, beta,
-                tspan_flip, yhistory_flip)
-
-        del yhistory_flip, ctx.yhistory
-
-        return (*adj_y, None, None, None, adj_params, None, None)
-
-
 def fdeint_adjoint(func,y0,beta,t,step_size,method,options=None):
 
     # We need this in order to access the variables inside this module,
@@ -130,14 +34,21 @@ def fdeint_adjoint(func,y0,beta,t,step_size,method,options=None):
         func = TupleFunc(func) # Wrap function to handle tensor input/output
 
     # Validate inputs and prepare for solving
-    shapes, _, func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS)
+    shapes, _, func, y0, tspan, method, beta = _check_inputs(func, y0, t, step_size, method, beta, SOLVERS_Forward)
 
     if options is None:
         options = {}
 
-    # Solve using adjoint method
-    flat_params = _flatten(func.parameters())
-    solution = FDEAdjointMethod.apply(*y0, func, beta, tspan, flat_params, method, options)
+    # # Solve using adjoint method
+    # flat_params = _flatten(func.parameters())
+    # solution = FDEAdjointMethod.apply(*y0, func, beta, tspan, flat_params, method, options)
+
+    # Get parameters
+    params = find_parameters(func)
+    n_state = len(y0)
+    n_params = len(params)
+    # Call FDEAdjointMethod with parameters
+    solution = FDEAdjointMethod.apply(func, n_state, n_params, *y0, beta, tspan, method, *params, options)
 
     # Post-process solution based on tensor mode
     if config.TENSOR_MODE == 'concat':
@@ -166,7 +77,162 @@ def fractional_pow(base, exponent):
     eps = 1e-4
     return torch.pow(base, exponent)
 
-def BackwardMixedOrderPredictor_f(func, y_aug, beta, tspan, yhistory, **options):
+
+class FDEAdjointMethod(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, func, n_state, n_params, *args):
+        # n_state, n_params are Python ints (not Tensors); their gradients should return None
+        n_state = int(n_state)
+        n_params = int(n_params)
+
+        # Parse positional arguments: y0_1,...,y0_n, beta, tspan, method, p1,...,pm, options
+        y0_tuple = tuple(args[:n_state])                               # Tensors
+        beta = args[n_state]                                           # Tensor or float
+        tspan = args[n_state + 1]                                      # Tensor
+        method = args[n_state + 2]                                     # str/enum (not Tensor)
+        func_params = tuple(args[n_state + 3 : n_state + 3 + n_params])  # Tensors (Parameters)
+        options = args[n_state + 3 + n_params]                         # dict
+
+        with torch.no_grad():
+            ans, yhistory = SOLVERS_Forward[method](func=func, y0=y0_tuple, beta=beta, tspan=tspan, **options)
+
+        # Check if gradients needed
+        y0_needs_grad = any(t.requires_grad for t in y0_tuple)
+        params_need_grad = any(p.requires_grad for p in func_params) if func_params else False
+
+        ctx.n_state = n_state
+        ctx.n_params = n_params
+        if y0_needs_grad or params_need_grad:
+            ctx.save_for_backward(tspan)
+            ctx.ans = ans
+            ctx.yhistory = yhistory
+            ctx.func = func
+            ctx.beta = beta
+            ctx.method = method
+            ctx.func_params = func_params
+        else:
+            del yhistory
+
+        return ans
+
+    @staticmethod
+    def backward(ctx, *grad_output):
+
+        """
+        Backward pass - 计算梯度
+        """
+        # 早退：不需要反传时，返回正确数量的 None
+        if not hasattr(ctx, 'yhistory'):
+            n_state = ctx.n_state
+            n_params = ctx.n_params
+            grads = []
+            grads.append(None)  # ode_func
+            grads.append(None)  # n_state
+            grads.append(None)  # n_params
+            grads.extend([None] * n_state)  # y0_1,...,y0_n
+            grads.append(None)  # beta
+            grads.append(None)  # t_grid
+            grads.append(None)  # method
+            grads.extend([None] * n_params)  # p1,...,pm
+            grads.append(None)  # memory
+            return tuple(grads)
+
+
+        tspan = ctx.saved_tensors[0]
+        ans = ctx.ans
+        yhistory = ctx.yhistory
+        ans = tuple(ans)
+        func = ctx.func
+        beta = ctx.beta
+        method = ctx.method
+        func_params = ctx.func_params
+        n_tensors = ctx.n_state
+
+        # Create AugDynamics class similar to first file
+        class AugDynamics:
+            def __init__(self, func, n_tensors, func_params):
+                self.func = func
+                self.n_tensors = n_tensors
+                self.f_params = func_params
+
+            def __call__(self, t, y_aug):
+                y, adj_y, adj_params = y_aug
+
+                with torch.set_grad_enabled(True):
+                    # detach and set requires_grad
+                    y = tuple(y_.detach().requires_grad_(True) for y_ in y)
+                    func_eval = self.func(t, y)
+
+                    # Compute VJP
+                    vjp_y_and_params = torch.autograd.grad(
+                        func_eval,
+                        y + self.f_params,
+                        tuple(adj_y),
+                        allow_unused=True,
+                        retain_graph=False,
+                        create_graph=False
+                    )
+
+                vjp_y = vjp_y_and_params[:self.n_tensors]
+                vjp_params = vjp_y_and_params[self.n_tensors:]
+
+                # Handle None gradients
+                vjp_y = tuple(
+                    torch.zeros_like(y_) if vjp_y_ is None else vjp_y_
+                    for vjp_y_, y_ in zip(vjp_y, y)
+                )
+
+                vjp_params = tuple(
+                    torch.zeros_like(p) if vp is None else vp
+                    for vp, p in zip(vjp_params, self.f_params)
+                )
+
+                return (func_eval, vjp_y, vjp_params)
+
+        augmented_dynamics = AugDynamics(func, n_tensors, func_params)
+        tspan_flip = tspan.flip(0)
+
+        if yhistory is not None:
+            yhistory_flip = ReversedListView(yhistory)
+        else:
+            yhistory_flip = None
+
+        with torch.no_grad():
+            adj_y = grad_output
+
+            # 初始化参数梯度
+            if func_params:
+                adj_params = tuple(torch.zeros_like(p) for p in func_params)
+            else:
+                adj_params = ()
+
+            aug_y0 = (ans, adj_y, adj_params)
+
+            adj_y, adj_params = SOLVERS_Backward[method](
+                augmented_dynamics, aug_y0, beta,
+                tspan_flip, yhistory_flip)
+
+        # 在最后，确保清理所有局部变量
+        del augmented_dynamics
+        del yhistory_flip
+        del yhistory  # 也要删除局部变量
+        del ans
+        del func
+        del func_params
+        del ctx.ans
+        del ctx.yhistory
+        del ctx.func
+        del ctx.func_params
+        del ctx.beta
+        del ctx.method
+
+        # Return gradients for each input: func, n_state, n_params, *y0, beta, tspan, method, *params, options
+        return None, None, None, *adj_y, None, None, None, *adj_params, None
+        #(func, n_state, n_params, *y0, beta, tspan, method, *params, options)
+
+
+def backward_predictor(func, y_aug, beta, tspan, yhistory, **options):
 # mixed order predictor with beta and 1.
     with torch.no_grad():
         N = len(tspan)
@@ -190,6 +256,7 @@ def BackwardMixedOrderPredictor_f(func, y_aug, beta, tspan, yhistory, **options)
         adj_y = _clone(adj_y0)
         adj_params = _clone(adj_params0)
         y = _clone(y0)
+        # return tuple(y_i.clone().detach() for y_i in adj_y), tuple(y_i.clone().detach() for y_i in adj_params)
 
         for k in range(N-1):
             tn = tspan[k]
@@ -198,11 +265,12 @@ def BackwardMixedOrderPredictor_f(func, y_aug, beta, tspan, yhistory, **options)
                         fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
 
 
-            fy_k, fadj_k, jp_params_k = func(tn, (y, adj_y, adj_params))
-            fadj_history.append(fadj_k)
+            # fy_k, fadj_k, vjp_params = func(tn, (y, adj_y, adj_params))
+            func_eval, vjp_y, vjp_params = func(tn, (y, adj_y, adj_params))
+            fadj_history.append(vjp_y)
 
             if yhistory is None:
-                fy_history.append(fy_k)
+                fy_history.append(func_eval)
             # can apply short memory here
             if True:#'memory' not in options:
                 memory = k
@@ -240,15 +308,23 @@ def BackwardMixedOrderPredictor_f(func, y_aug, beta, tspan, yhistory, **options)
                 weight_term = _multiply(gamma_beta, b_all_k)
                 y = _add(y0, weight_term)
 
-            adj_params = adj_params + h * jp_params_k
+            # Update parameter gradients using tuple comprehension
+            # if adj_params and vjp_params:
+            #     adj_params = tuple(
+            #         ap + h * vp for ap, vp in zip(adj_params, vjp_params)
+            #     )
+            # 更新参数梯度
+            if adj_params and vjp_params:
+                for ap, vp in zip(adj_params, vjp_params):
+                    ap.add_(vp, alpha=h)  # 直接修改 tuple 中的张量
 
-    # release memory
+# release memory
     del fadj_history, yhistory, fy_history
     del b_j_k_1
     return adj_y, adj_params
 
 
-def ForwardPredictor_w_History(func, y0, beta, tspan, **options):
+def forward_predictor(func, y0, beta, tspan, **options):
     """Use one-step Adams-Bashforth (Euler) method to integrate Caputo equation
         D^beta y(t) = f(t,y)
         Args:
@@ -286,7 +362,7 @@ def ForwardPredictor_w_History(func, y0, beta, tspan, **options):
             yhistory.append(yn)
 
             # can apply short memory here
-            if 'memory' not in options:
+            if 'memory' not in options or options['memory'] == -1:
                 memory = k
             else:
                 memory = options['memory']
@@ -295,7 +371,6 @@ def ForwardPredictor_w_History(func, y0, beta, tspan, **options):
             j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
             b_j_k_1 = (fractional_pow(h, beta) / beta) * (
                     fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
-
             # Initialize accumulator with correct structure (tensor or tuple)
             if _is_tuple(fhistory[memory_k]):
                 b_all_k = tuple(torch.zeros_like(f_i) for f_i in fhistory[memory_k])
@@ -317,53 +392,7 @@ def ForwardPredictor_w_History(func, y0, beta, tspan, **options):
         del b_j_k_1
         return yn, yhistory
 
-
-# TODO: need to revise it to accept tuple of tensors as input
-def ForwardPredictor_wo_History(func, y0, beta, tspan, **options):
-    with torch.no_grad():
-        N = len(tspan)
-        # print("N: ", N)
-        h = (tspan[-1] - tspan[0]) / (N - 1)
-        # print("h: ", h)
-        gamma_beta = 1 / math.gamma(beta)
-        fhistory = []
-        device = y0.device
-        yn = y0.clone()
-
-        for k in range(N):
-            tn = tspan[k]
-            f_k = func(tn, yn)
-            fhistory.append(f_k)
-
-            # can apply short memory here
-            if 'memory' not in options:
-                memory = k
-            else:
-                memory = options['memory']
-            memory_k = max(0, k - memory)
-
-            j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
-            b_j_k_1 = (fractional_pow(h, beta) / beta) * (
-                        fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
-
-
-            # temp_product = torch.stack([b_j_k_1[i] * fhistory[i] for i in range(memory_k, k + 1)])
-            # b_all_k = torch.sum(temp_product, dim=0)
-
-            sample_product = b_j_k_1[memory_k] * fhistory[memory_k]
-            b_all_k = torch.zeros_like(sample_product)  # Initialize accumulator with zeros of the same shape as the product
-            # Loop through the range and accumulate results
-            for i in range(memory_k, k + 1):
-                b_all_k += b_j_k_1[i] * fhistory[i]
-
-            yn = y0 + gamma_beta * b_all_k
-    # release memory
-    del fhistory
-    del b_j_k_1, b_all_k
-    del sample_product
-    return yn, None
-
-def BackwardMixedOrderGLmethod_f(func, y_aug, beta, tspan, yhistory_ori):
+def backward_gl(func, y_aug, beta, tspan, yhistory_ori):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
@@ -399,19 +428,22 @@ def BackwardMixedOrderGLmethod_f(func, y_aug, beta, tspan, yhistory_ori):
                 right = _add(right, _multiply(c[j], adjy_history[k - j]))
 
             y_ori = yhistory_ori[k]
-            func_eval, f_term, jp_params = func(tn, (y_ori, adj_y, adj_params))
+            func_eval, vjp_y, vjp_params = func(tn, (y_ori, adj_y, adj_params))
 
-            f_h_term = _multiply(h_power, f_term)
+            f_h_term = _multiply(h_power, vjp_y)
             adj_y = _minus(f_h_term, right)
 
             adjy_history.append(adj_y)
 
-            adj_params = adj_params + h * jp_params
+            # Update parameter gradients using tuple comprehension
+            if adj_params and vjp_params:
+                for ap, vp in zip(adj_params, vjp_params):
+                    ap.add_(vp, alpha=h)  # 直接修改 tuple 中的张量
 
     del adjy_history, yhistory_ori
     return adj_y, adj_params
 
-def ForwardGLmethod_w_History(func,y0,beta,tspan,**options):
+def forward_gl(func,y0,beta,tspan,**options):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
@@ -454,8 +486,7 @@ def ForwardGLmethod_w_History(func,y0,beta,tspan,**options):
         return yn, y_history
 
 
-
-def BackwardMixedOrderTrap_f(func, y_aug, beta, tspan, yhistory_ori):
+def backward_trap(func, y_aug, beta, tspan, yhistory_ori):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
@@ -497,20 +528,26 @@ def BackwardMixedOrderTrap_f(func, y_aug, beta, tspan, yhistory_ori):
 
 
             y_ori = yhistory_ori[k]
-            func_eval, f_term, jp_params = func(tn, (y_ori, adj_y, adj_params))
+            # func_eval, f_term, vjp_params = func(tn, (y_ori, adj_y, adj_params))
+            func_eval, vjp_y, vjp_params = func(tn, (y_ori, adj_y, adj_params))
 
-            f_h_term = _multiply(h_power * gamma_factor, f_term)
+
+            f_h_term = _multiply(h_power * gamma_factor, vjp_y)
             adj_y = _minus(f_h_term, right)
             adjy_history.append(adj_y)
 
-            adj_params = adj_params + h * jp_params
+            # Update parameter gradients using tuple comprehension
+            # 更新参数梯度
+            if adj_params and vjp_params:
+                for ap, vp in zip(adj_params, vjp_params):
+                    ap.add_(vp, alpha=h)  # 直接修改 tuple 中的张量
 
     return adj_y, adj_params
 
 
 
 
-def ForwardProduct_Trap_w_History(func,y0,beta,tspan,**options):
+def forward_trap(func,y0,beta,tspan,**options):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
@@ -558,9 +595,10 @@ def ForwardProduct_Trap_w_History(func,y0,beta,tspan,**options):
     return yn, y_history
 
 
-def BackwardMixedOrde_o(func, y_aug, beta, tspan, yhistory_ori):
+def backward_euler_w_history(func, y_aug, beta, tspan, yhistory_ori):
     with torch.no_grad():
         N = len(tspan)
+        # print('N = len(tspan)', N, tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
         h = torch.abs(h)
         y0, adj_y0, adj_params0 = y_aug  ### we will use yhistory_ori rather than compute y again
@@ -579,6 +617,8 @@ def BackwardMixedOrde_o(func, y_aug, beta, tspan, yhistory_ori):
         adj_params = _clone(adj_params0)
         y = _clone(y0)
 
+        # return tuple(y_i.clone() for y_i in adj_y0), tuple(y_i.clone() for y_i in adj_params0)
+
         for k in range(N-1):
             tn = tspan[k]
 
@@ -588,8 +628,6 @@ def BackwardMixedOrde_o(func, y_aug, beta, tspan, yhistory_ori):
             if yhistory_ori is not None and k<N:
                 y = yhistory_ori[k+1]
             else:
-
-
                 fy_history.append(func_eval)
                 j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
                 b_j_k_1 = (fractional_pow(h, beta) / beta) * (
@@ -611,17 +649,68 @@ def BackwardMixedOrde_o(func, y_aug, beta, tspan, yhistory_ori):
 
 
             adj_y = _add(adj_y, _multiply(h, vjp_y))
-            adj_params = adj_params + h * vjp_params
+
+            # Update parameter gradients using tuple comprehension
+            # 更新参数梯度
+            if adj_params and vjp_params:
+                for ap, vp in zip(adj_params, vjp_params):
+                    ap.add_(vp, alpha=h)  # 直接修改 tuple 中的张量
 
     del yhistory_ori, fy_history
     return adj_y, adj_params
 
+def find_parameters(module):
+
+    assert isinstance(module, nn.Module)
+
+    # If called within DataParallel, parameters won't appear in module.parameters().
+    if getattr(module, '_is_replica', False):
+
+        def find_tensor_attributes(module):
+            tuples = [(k, v) for k, v in module.__dict__.items() if torch.is_tensor(v) and v.requires_grad]
+            return tuples
+
+        gen = module._named_members(get_members_fn=find_tensor_attributes)
+        return [param for _, param in gen]
+    else:
+        return list(module.parameters())
 
 
-SOLVERS = {"predictor-f":ForwardPredictor_w_History,
-           "predictor-o":ForwardPredictor_w_History,
-           "gl-f":ForwardGLmethod_w_History,
-           "gl-o":ForwardGLmethod_w_History,
-           "trap-f":ForwardProduct_Trap_w_History,
-           "trap-o":ForwardProduct_Trap_w_History,
+
+# forward_gl_compiled = torch.compile(forward_gl)
+# backward_gl_compiled = torch.compile(backward_gl)
+# forward_predictor_compiled = torch.compile(forward_predictor)
+# backward_predictor_compiled = torch.compile(backward_predictor)
+# forward_trap_compiled = torch.compile(forward_trap)
+# backward_trap_compiled = torch.compile(backward_trap)
+
+
+forward_gl_compiled = forward_gl#torch.compile(forward_gl)
+backward_gl_compiled = backward_gl#torch.compile(backward_gl)
+forward_predictor_compiled = forward_predictor#torch.compile(forward_predictor)
+backward_predictor_compiled = backward_predictor#torch.compile(backward_predictor)
+forward_trap_compiled = forward_trap#torch.compile(forward_trap)
+backward_trap_compiled = backward_trap#torch.compile(backward_trap)
+
+backward_euler_w_history_compiled = backward_euler_w_history#torch.compile(backward_euler_w_history)
+
+
+
+SOLVERS_Forward = {
+            "predictor-f":forward_predictor_compiled,
+           "predictor-o":forward_predictor_compiled,
+           "gl-f":forward_gl_compiled,
+           "gl-o":forward_gl_compiled,
+           "trap-f":forward_trap_compiled,
+           "trap-o":forward_trap_compiled,
+            # "euler":forward_euler_w_history_compiled,
+}
+
+SOLVERS_Backward = {"predictor-f":backward_predictor_compiled,
+           "predictor-o":backward_euler_w_history_compiled,
+           "gl-f":backward_gl_compiled,
+           "gl-o":backward_euler_w_history_compiled,
+           "trap-f":backward_trap_compiled,
+           "trap-o":backward_euler_w_history_compiled,
+            # "euler": backward_euler_w_history_compiled,
 }
