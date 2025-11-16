@@ -41,7 +41,7 @@ def GLmethod(func, y0, beta, tspan, **options):
             right = tuple(torch.zeros_like(comp) for comp in y0)
         else:
             right = 0
-
+        
         for j in range(1, k + 1):
             right = _add(right, _multiply(c[j], y_history[k - j]))
 
