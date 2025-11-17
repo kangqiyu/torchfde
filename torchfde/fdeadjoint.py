@@ -774,7 +774,9 @@ def backward_euler_w_history(func, y_aug, beta, tspan, yhistory):
             #     weight_term = _multiply(gamma_beta, b_all_k)
             #     y = _add(y0, weight_term)
 
-            adj_y = _add(adj_y, _multiply(h, vjp_y))
+            # adj_y = _add(adj_y, _multiply(h, vjp_y))
+            adj_y = _addmul_inplace(adj_y, vjp_y, h)
+
 
             # Update parameter gradients using tuple comprehension
             # 更新参数梯度
