@@ -251,11 +251,11 @@ def backward_predictor(func, y_aug, beta, tspan, yhistory, **options):
             tn = tspan[k]
 
             # CHANGED: Fixed memory handling to match corrected forward_predictor
-            # if 'memory' not in options or options['memory'] == -1:
-            #     memory_length = k + 1  # Use all available history
-            # else:
-            #     memory_length = min(options['memory'], k + 1)
-            #     assert memory_length > 0, "memory must be greater than 0"
+            if 'memory' not in options or options['memory'] == -1:
+                memory_length = k + 1  # Use all available history
+            else:
+                memory_length = min(options['memory'], k + 1)
+                assert memory_length > 0, "memory must be greater than 0"
 
             # CHANGED: Corrected start_idx calculation
             start_idx = 0#max(0, k + 1 - memory_length)
@@ -434,13 +434,13 @@ def backward_gl(func, y_aug, beta, tspan, yhistory, **options):
             func_eval, vjp_y, vjp_params = func(t_k, (y_current, adj_y_current, adj_params))
 
             # CHANGED: Add memory handling
-            # if 'memory' not in options or options['memory'] == -1:
-            #     memory_length = k + 1  # Use all available history
-            # else:
-            #     memory_length = min(options['memory'], k + 1)
-            #     assert memory_length > 0, "memory must be greater than 0"
-            memory_length = k + 1
-            start_idx = max(0, k + 1 - memory_length)
+            if 'memory' not in options or options['memory'] == -1:
+                memory_length = k + 1  # Use all available history
+            else:
+                memory_length = min(options['memory'], k + 1)
+                assert memory_length > 0, "memory must be greater than 0"
+
+            start_idx = 0#max(0, k + 1 - memory_length)
 
             # CHANGED: Initialize convolution_sum properly
             convolution_sum = None
@@ -545,64 +545,98 @@ def forward_gl(func, y0, beta, tspan, **options):
         return y_current, y_history  # CHANGED: Fixed - return y_current instead of yn
 
 
-def backward_trap(func, y_aug, beta, tspan, yhistory_ori):
+def backward_trap(func, y_aug, beta, tspan, yhistory_ori, **options):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
         h = torch.abs(h)
 
-        _, adj_y0, adj_params0 = y_aug  ### we will use yhistory_ori rather than compute y again
+        # CHANGED: Pre-compute h^beta * Gamma(2-beta) for efficiency
+        h_alpha_gamma = torch.pow(h, beta) * math.gamma(2 - beta)
+        one_minus_beta = 1 - beta
 
+        _, adj_y0, adj_params0 = y_aug  ### we will use yhistory_ori rather than compute y again
         if _is_tuple(adj_y0):
             device = adj_y0[0].device
         else:
             device = adj_y0.device
 
-        adj_y = _clone(adj_y0)
         adj_params = _clone(adj_params0)
 
-        c = torch.zeros(N + 1, dtype=torch.float64, device=device)
-        c[0] = 1
-        h_power = torch.pow(h, beta)
-        gamma_factor = math.gamma(2 - beta)
+        # CHANGED: Removed unused c array computation
+        # CHANGED: Use adj_y_current for clarity
+        adj_y_current = _clone(adj_y0)
+        adjy_history = [adj_y_current]
 
-        for j in range(1, N + 1):
-            c[j] = (1 - (1 + beta) / j) * c[j - 1]
+        # CHANGED: Fixed loop range from range(1, N) to range(N - 1)
+        for k in range(N - 1):
+            # CHANGED: Use tspan[k] for current time
+            t_k = tspan[k]
 
-        adjy_history = [adj_y]
+            # CHANGED: Get the corresponding y from history at current time
+            y_current = yhistory_ori[k]
 
-        for k in range(1, N):
-            tn = tspan[k]
+            # CHANGED: Evaluate function at current time with current states
+            func_eval, vjp_y, vjp_params = func(t_k, (y_current, adj_y_current, adj_params))
 
-            # Initialize right term with correct structure
-            if _is_tuple(adj_y):
-                right = tuple(torch.zeros_like(comp) for comp in adj_y)
+            # CHANGED: Add memory handling
+            if 'memory' not in options or options['memory'] == -1:
+                memory_length = k + 1  # Use all available history
             else:
-                right = 0
+                memory_length = min(options['memory'], k + 1)
+                assert memory_length > 0, "memory must be greater than 0"
 
-            for j in range(0, k):
-                coeff = RLcoeffs(k, j, beta)
-                # Handle tuple case
-                right = _add(right, _multiply(coeff, adjy_history[j]))
+            start_idx = 0#max(0, k + 1 - memory_length)
+
+            # CHANGED: Compute A_{j,k+1} weights correctly instead of RLcoeffs
+            j_vals = torch.arange(start_idx, k + 1, dtype=torch.float32, device=device)
+
+            # Compute A_{j,k+1} weights (same as forward_trap)
+            kjp2 = torch.pow(k + 2 - j_vals, one_minus_beta)
+            kj = torch.pow(k - j_vals, one_minus_beta)
+            kjp1 = torch.pow(k + 1 - j_vals, one_minus_beta)
+
+            # General formula for j >= 1
+            A_j_kp1 = kjp2 + kj - 2 * kjp1
+
+            # CHANGED: Special handling for j=0 if it's in the range
+            if start_idx == 0:
+                k_power = torch.pow(torch.tensor(k, dtype=torch.float32, device=device), one_minus_beta)
+                kp1_neg_alpha = torch.pow(torch.tensor(k + 1, dtype=torch.float32, device=device), -beta)
+                A_j_kp1[0] = k_power - (k + beta) * kp1_neg_alpha
+
+            # CHANGED: Initialize convolution_sum properly
+            convolution_sum = None
+
+            # CHANGED: Accumulate with correct indexing
+            for j in range(start_idx, k + 1):
+                local_idx = j - start_idx  # Index into A_j_kp1 array
+
+                if convolution_sum is None:
+                    convolution_sum = _multiply(A_j_kp1[local_idx], adjy_history[j])
+                else:
+                    # CHANGED: Use in-place operation for efficiency
+                    convolution_sum = _addmul_inplace(convolution_sum, adjy_history[j], A_j_kp1[local_idx])
+
+            # Compute adj_y_{k+1} = Γ(2-α) * h^α * vjp_y - convolution_sum
+            # f_h_term = _multiply(h_alpha_gamma, vjp_y)
+            # adj_y_current = _minus(f_h_term, convolution_sum)
+
+            adj_y_current = _minusmul_inplace(convolution_sum, vjp_y, h_alpha_gamma)
 
 
-            y_ori = yhistory_ori[k]
-            # func_eval, f_term, vjp_params = func(tn, (y_ori, adj_y, adj_params))
-            func_eval, vjp_y, vjp_params = func(tn, (y_ori, adj_y, adj_params))
+            # Store adj_y_{k+1} in history
+            adjy_history.append(adj_y_current)
 
-
-            f_h_term = _multiply(h_power * gamma_factor, vjp_y)
-            adj_y = _minus(f_h_term, right)
-            adjy_history.append(adj_y)
-
-            # Update parameter gradients using tuple comprehension
-            # 更新参数梯度
+            # Update parameter gradients - already using in-place operation, good!
             if adj_params and vjp_params:
                 for ap, vp in zip(adj_params, vjp_params):
-                    ap.add_(vp, alpha=h)  # 直接修改 tuple 中的张量
+                    ap.add_(vp, alpha=h)
 
-    return adj_y, adj_params
-
+        # CHANGED: Add memory cleanup
+        del adjy_history, yhistory_ori
+        # CHANGED: Return adj_y_current instead of adj_y
+        return adj_y_current, adj_params
 
 def forward_trap(func, y0, beta, tspan, **options):
     with torch.no_grad():
@@ -685,7 +719,7 @@ def forward_trap(func, y0, beta, tspan, **options):
 
         return y_current, y_history  # CHANGED: Return y_current instead of yn
 
-def backward_euler_w_history(func, y_aug, beta, tspan, yhistory_ori):
+def backward_euler_w_history(func, y_aug, beta, tspan, yhistory):
     with torch.no_grad():
         N = len(tspan)
         # print('N = len(tspan)', N, tspan)
@@ -714,32 +748,33 @@ def backward_euler_w_history(func, y_aug, beta, tspan, yhistory_ori):
 
 
             func_eval, vjp_y, vjp_params = func(tn, (y, adj_y, adj_params))
+            y = yhistory[k + 1]
 
-            if yhistory_ori is not None and k<N:
-                y = yhistory_ori[k+1]
-            else:
-                fy_history.append(func_eval)
-                j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
-                b_j_k_1 = (torch.pow(h, beta) / beta) * (
-                        torch.pow(k + 1 - j_vals, beta) - torch.pow(k - j_vals, beta))
-
-                # Initialize accumulator with correct structure (tensor or tuple)
-                if _is_tuple(fy_history[0]):
-                    b_all_k = tuple(torch.zeros_like(f_i) for f_i in fy_history[0])
-                else:
-                    b_all_k = torch.zeros_like(fy_history[0])
-
-                # Loop through the range and accumulate results
-                for i in range(0, k + 1):
-                    b_all_k = _add(b_all_k, _multiply(b_j_k_1[i], fy_history[i]))
-
-                # Final update step
-                weight_term = _multiply(gamma_beta, b_all_k)
-                y = _add(y0, weight_term)
-
+            ## We assume having the full yhistory
+            ## We do not consider the following case any more.
+            # if yhistory is not None and k<N:
+            #     y = yhistory[k+1]
+            # else:
+            #     fy_history.append(func_eval)
+            #     j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
+            #     b_j_k_1 = (torch.pow(h, beta) / beta) * (
+            #             torch.pow(k + 1 - j_vals, beta) - torch.pow(k - j_vals, beta))
+            #
+            #     # Initialize accumulator with correct structure (tensor or tuple)
+            #     if _is_tuple(fy_history[0]):
+            #         b_all_k = tuple(torch.zeros_like(f_i) for f_i in fy_history[0])
+            #     else:
+            #         b_all_k = torch.zeros_like(fy_history[0])
+            #
+            #     # Loop through the range and accumulate results
+            #     for i in range(0, k + 1):
+            #         b_all_k = _add(b_all_k, _multiply(b_j_k_1[i], fy_history[i]))
+            #
+            #     # Final update step
+            #     weight_term = _multiply(gamma_beta, b_all_k)
+            #     y = _add(y0, weight_term)
 
             adj_y = _add(adj_y, _multiply(h, vjp_y))
-
 
             # Update parameter gradients using tuple comprehension
             # 更新参数梯度
@@ -747,7 +782,7 @@ def backward_euler_w_history(func, y_aug, beta, tspan, yhistory_ori):
                 for ap, vp in zip(adj_params, vjp_params):
                     ap.add_(vp, alpha=h)  # 直接修改 tuple 中的张量
 
-    del yhistory_ori, fy_history
+    del yhistory, fy_history
     return adj_y, adj_params
 
 def find_parameters(module):
