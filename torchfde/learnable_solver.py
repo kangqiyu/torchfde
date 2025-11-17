@@ -4,8 +4,6 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from .utils_fde import _check_inputs_tensorinput
-from .explicit_solver import fractional_pow
-
 
 class LearnbleFDEINT(nn.Module):
     """
@@ -233,7 +231,7 @@ class AttentionKernel_simple(nn.Module):
                 beta = options['beta']
                 h = options['h']
                 j_vals = torch.arange(0, seq_len, dtype=torch.float32, device=device)
-                b_j_k_1 = (fractional_pow(h, beta) / beta) * (fractional_pow(seq_len - j_vals, beta))
+                b_j_k_1 = (torch.pow(h, beta) / beta) * (torch.pow(seq_len - j_vals, beta))
                 # Expand b_j_k_1 to match attn_weights dimensions
                 b_j_k_1 = b_j_k_1.view(1, 1, -1).expand_as(attn_weights)
                 # Add to attention weights
@@ -303,7 +301,7 @@ class AttentionKernel(nn.Module):
                 beta = options['beta']
                 h = options['h']
                 j_vals = torch.arange(0, seq_len, dtype=torch.float32, device=device)
-                b_j_k_1 = (fractional_pow(h, beta) / beta) * (fractional_pow(seq_len - j_vals, beta))
+                b_j_k_1 = (torch.pow(h, beta) / beta) * (torch.pow(seq_len - j_vals, beta))
 
                 # Expand b_j_k_1 to match the shape of attn_weights
                 b_j_k_1 = b_j_k_1.view(1, 1, -1).expand_as(attn_weights)
@@ -402,7 +400,7 @@ class AttentionKernel_Position(nn.Module):
                 beta = options['beta']
                 h = options['h']
                 j_vals = torch.arange(0, seq_len, dtype=torch.float32, device=device)
-                b_j_k_1 = (fractional_pow(h, beta) / beta) * (fractional_pow(seq_len - j_vals, beta))
+                b_j_k_1 = (torch.pow(h, beta) / beta) * (torch.pow(seq_len - j_vals, beta))
 
                 # Expand b_j_k_1 to match the shape of attn_weights
                 b_j_k_1 = b_j_k_1.view(1, 1, -1).expand_as(attn_weights)

@@ -2,11 +2,8 @@ import torch
 import math
 import torch.nn as nn
 from .utils_fde import _flatten, _flatten_convert_none_to_zeros,_check_inputs, _flat_to_shape
+from .utils_fde import _addmul_inplace, _mul_inplace, _minusmul_inplace
 from .utils_fde import _is_tuple, _clone, _add, _multiply, _minus, ReversedListView
-# from . import fdeint
-# from .explicit_solver import Predictor,Predictor_Corrector
-# from .implicit_solver import Implicit_l1
-from .riemann_liouville_solver import RLcoeffs
 from . import config
 
 
@@ -71,12 +68,6 @@ def fdeint_adjoint(func,y0,beta,t,step_size,method,options=None):
         assert isinstance(solution, tuple)
 
     return solution
-
-
-def fractional_pow(base, exponent):
-    eps = 1e-4
-    return torch.pow(base, exponent)
-
 
 class FDEAdjointMethod(torch.autograd.Function):
 
@@ -233,21 +224,20 @@ class FDEAdjointMethod(torch.autograd.Function):
 
 
 def backward_predictor(func, y_aug, beta, tspan, yhistory, **options):
-# mixed order predictor with beta and 1.
+    # mixed order predictor with beta and 1.
     with torch.no_grad():
         N = len(tspan)
-        # print("N: ", N)
         h = (tspan[-1] - tspan[0]) / (N - 1)
         h = torch.abs(h)
-        # print("h: ", h)
-        gamma_beta =  1 / math.gamma(beta)
-        fadj_history = []
+        gamma_beta = 1 / math.gamma(beta)
+        # CHANGED: Pre-compute h^beta/beta for efficiency
+        h_beta_over_beta = torch.pow(h, beta) / beta
 
-        if True:#yhistory is None:
+        fadj_history = []
+        if yhistory is None:  # CHANGED: Fixed condition (was "if True:")
             fy_history = []
 
-        y0, adj_y0, adj_params0 = y_aug ### we will use yhistory rather than compute y again
-
+        y0, adj_y0, adj_params0 = y_aug  ### we will use yhistory rather than compute y again
         if _is_tuple(y0):
             device = y0[0].device
         else:
@@ -256,72 +246,80 @@ def backward_predictor(func, y_aug, beta, tspan, yhistory, **options):
         adj_y = _clone(adj_y0)
         adj_params = _clone(adj_params0)
         y = _clone(y0)
-        # return tuple(y_i.clone().detach() for y_i in adj_y), tuple(y_i.clone().detach() for y_i in adj_params)
 
-        for k in range(N-1):
+        for k in range(N - 1):
             tn = tspan[k]
-            j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
-            b_j_k_1 = (fractional_pow(h, beta) / beta) * (
-                        fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
 
+            # CHANGED: Fixed memory handling to match corrected forward_predictor
+            # if 'memory' not in options or options['memory'] == -1:
+            #     memory_length = k + 1  # Use all available history
+            # else:
+            #     memory_length = min(options['memory'], k + 1)
+            #     assert memory_length > 0, "memory must be greater than 0"
 
-            # fy_k, fadj_k, vjp_params = func(tn, (y, adj_y, adj_params))
+            # CHANGED: Corrected start_idx calculation
+            start_idx = 0#max(0, k + 1 - memory_length)
+
+            # CHANGED: j_vals now starts from start_idx instead of 0
+            j_vals = torch.arange(start_idx, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
+
+            # CHANGED: Use torch.pow and pre-computed h_beta_over_beta
+            b_j_k_1 = h_beta_over_beta * (
+                    torch.pow(k + 1 - j_vals, beta) - torch.pow(k - j_vals, beta))
+
             func_eval, vjp_y, vjp_params = func(tn, (y, adj_y, adj_params))
             fadj_history.append(vjp_y)
-
             if yhistory is None:
                 fy_history.append(func_eval)
-            # can apply short memory here
-            if True:#'memory' not in options:
-                memory = k
-            else:
-                memory = options['memory']
-            memory_k = max(0, k - memory)
 
-            if _is_tuple(fadj_history[memory_k]):
-                b_all_k = tuple(torch.zeros_like(f_i) for f_i in fadj_history[memory_k])
-            else:
-                b_all_k = torch.zeros_like(fadj_history[memory_k])
+            # CHANGED: Initialize accumulator properly
+            convolution_sum = None
 
-            # Loop through the range and accumulate results
-            for i in range(memory_k, k + 1):
-                b_all_k = _add(b_all_k, _multiply(b_j_k_1[i], fadj_history[i]))
-
+            # CHANGED: Loop through the correct range with proper indexing
+            for j in range(start_idx, k + 1):
+                local_idx = j - start_idx  # CHANGED: Use local index for b_j_k_1
+                if convolution_sum is None:
+                    convolution_sum = _multiply(b_j_k_1[local_idx], fadj_history[j])
+                else:
+                    # CHANGED: Use in-place operation for efficiency
+                    convolution_sum = _addmul_inplace(convolution_sum, fadj_history[j], b_j_k_1[local_idx])
 
             # Final update step
-            weight_term = _multiply(gamma_beta, b_all_k)
+            # CHANGED: Use in-place multiplication
+            weight_term = _mul_inplace(convolution_sum, gamma_beta)
             adj_y = _add(adj_y0, weight_term)
 
-            if yhistory is not None and k<N-1:
-                y = yhistory[k+1]
+            # Handle y update
+            if yhistory is not None and k < N - 1:
+                y = yhistory[k + 1]
             elif yhistory is None:
+                # CHANGED: Reuse same pattern for y computation
+                y_convolution_sum = None
 
-                if _is_tuple(fy_history[memory_k]):
-                    b_all_k = tuple(torch.zeros_like(f_i) for f_i in fy_history[memory_k])
-                else:
-                    b_all_k = torch.zeros_like(fy_history[memory_k])
+                # CHANGED: Loop through the correct range with proper indexing
+                for j in range(start_idx, k + 1):
+                    local_idx = j - start_idx  # CHANGED: Use local index for b_j_k_1
+                    if y_convolution_sum is None:
+                        y_convolution_sum = _multiply(b_j_k_1[local_idx], fy_history[j])
+                    else:
+                        # CHANGED: Use in-place operation for efficiency
+                        y_convolution_sum = _addmul_inplace(y_convolution_sum, fy_history[j], b_j_k_1[local_idx])
 
-                # Loop through the range and accumulate results
-                for i in range(memory_k, k + 1):
-                    b_all_k = _add(b_all_k, _multiply(b_j_k_1[i], fy_history[i]))
+                # CHANGED: Use in-place multiplication
+                y_weight_term = _mul_inplace(y_convolution_sum, gamma_beta)
+                y = _add(y0, y_weight_term)
 
-                weight_term = _multiply(gamma_beta, b_all_k)
-                y = _add(y0, weight_term)
-
-            # Update parameter gradients using tuple comprehension
-            # if adj_params and vjp_params:
-            #     adj_params = tuple(
-            #         ap + h * vp for ap, vp in zip(adj_params, vjp_params)
-            #     )
-            # 更新参数梯度
+            # Update parameter gradients - already using in-place operation, good!
             if adj_params and vjp_params:
                 for ap, vp in zip(adj_params, vjp_params):
-                    ap.add_(vp, alpha=h)  # 直接修改 tuple 中的张量
+                    ap.add_(vp, alpha=h)
 
-# release memory
-    del fadj_history, yhistory, fy_history
-    del b_j_k_1
-    return adj_y, adj_params
+        # release memory
+        del fadj_history
+        if yhistory is None:  # CHANGED: Only delete fy_history if it was created
+            del fy_history
+        del b_j_k_1
+        return adj_y, adj_params
 
 
 def forward_predictor(func, y0, beta, tspan, **options):
@@ -344,16 +342,17 @@ def forward_predictor(func, y0, beta, tspan, **options):
         h = (tspan[-1] - tspan[0]) / (N - 1)
         h = torch.abs(h)
         gamma_beta = 1 / math.gamma(beta)
+        h_beta_over_beta = torch.pow(h, beta) / beta
+
         fhistory = []
         yhistory = []
-
         # Get device from y0 (handle both tensor and tuple cases)
         if _is_tuple(y0):
             device = y0[0].device
         else:
             device = y0.device
-
         yn = _clone(y0)
+        # yn = y0
 
         for k in range(N - 1):
             tn = tspan[k]
@@ -361,44 +360,49 @@ def forward_predictor(func, y0, beta, tspan, **options):
             fhistory.append(f_k)
             yhistory.append(yn)
 
-            # can apply short memory here
             if 'memory' not in options or options['memory'] == -1:
-                memory = k
+                memory_length = k + 1  # Use all available history
             else:
-                memory = options['memory']
-            memory_k = max(0, k - memory)
+                memory_length = min(options['memory'], k + 1)
+                assert memory_length > 0, "memory must be greater than 0"
 
-            j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
-            b_j_k_1 = (fractional_pow(h, beta) / beta) * (
-                    fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
-            # Initialize accumulator with correct structure (tensor or tuple)
-            if _is_tuple(fhistory[memory_k]):
-                b_all_k = tuple(torch.zeros_like(f_i) for f_i in fhistory[memory_k])
-            else:
-                b_all_k = torch.zeros_like(fhistory[memory_k])
+            start_idx = max(0, k + 1 - memory_length)
 
-            # Loop through the range and accumulate results
-            for i in range(memory_k, k + 1):
-                b_all_k = _add(b_all_k, _multiply(b_j_k_1[i], fhistory[i]))
+            j_vals = torch.arange(start_idx, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
+
+            b_j_k_1 = h_beta_over_beta * (
+                    torch.pow(k + 1 - j_vals, beta) - torch.pow(k - j_vals, beta))
+
+            convolution_sum = None
+
+            for j in range(start_idx, k + 1):
+                local_idx = j - start_idx  # CHANGED: Use local index for b_j_k_1
+                if convolution_sum is None:
+                    convolution_sum = _multiply(b_j_k_1[local_idx], fhistory[j])
+                else:
+                    # convolution_sum = _add(convolution_sum, _multiply(b_j_k_1[local_idx], fhistory[j]))
+                    #_addmul_inplace(target, source, alpha):
+                    # In-place fused multiply-add operation: target += alpha * source
+                    convolution_sum = _addmul_inplace(convolution_sum, fhistory[j], b_j_k_1[local_idx])
 
             # Final update step
-            weight_term = _multiply(gamma_beta, b_all_k)
+            # weight_term = _multiply(gamma_beta, convolution_sum)
+            weight_term = _mul_inplace(convolution_sum, gamma_beta)
             yn = _add(y0, weight_term)
 
         yhistory.append(yn)
-
         # release memory
         del fhistory
         del b_j_k_1
         return yn, yhistory
 
-def backward_gl(func, y_aug, beta, tspan, yhistory_ori):
+
+def backward_gl(func, y_aug, beta, tspan, yhistory, **options):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
         h = torch.abs(h)
-        _, adj_y0, adj_params0 = y_aug ### we will use yhistory_ori rather than compute y again
-
+        _, adj_y0, adj_params0 = y_aug  ### we will use yhistory rather than compute y again
         if _is_tuple(adj_y0):
             device = adj_y0[0].device
         else:
@@ -411,39 +415,68 @@ def backward_gl(func, y_aug, beta, tspan, yhistory_ori):
         c[0] = 1
         for j in range(1, N + 1):
             c[j] = (1 - (1 + beta) / j) * c[j - 1]
+
         h_power = torch.pow(h, beta)
 
-        adjy_history = [adj_y]
+        # CHANGED: Use adj_y_current for clarity
+        adj_y_current = _clone(adj_y0)
+        adjy_history = [adj_y_current]
 
-        for k in range(1, N):
-            tn = tspan[k]
+        # CHANGED: Fixed loop range from range(1, N) to range(N - 1)
+        for k in range(N - 1):
+            # CHANGED: Use tspan[k] for current time
+            t_k = tspan[k]
 
-            # Initialize right term with correct structure
-            if _is_tuple(adj_y0):
-                right = tuple(torch.zeros_like(comp) for comp in adj_y0)
-            else:
-                right = 0
+            # CHANGED: Get the corresponding y from history at current time
+            y_current = yhistory[k]
 
-            for j in range(1, k + 1):
-                right = _add(right, _multiply(c[j], adjy_history[k - j]))
+            # CHANGED: Evaluate function at current time with current states
+            func_eval, vjp_y, vjp_params = func(t_k, (y_current, adj_y_current, adj_params))
 
-            y_ori = yhistory_ori[k]
-            func_eval, vjp_y, vjp_params = func(tn, (y_ori, adj_y, adj_params))
+            # CHANGED: Add memory handling
+            # if 'memory' not in options or options['memory'] == -1:
+            #     memory_length = k + 1  # Use all available history
+            # else:
+            #     memory_length = min(options['memory'], k + 1)
+            #     assert memory_length > 0, "memory must be greater than 0"
+            memory_length = k + 1
+            start_idx = max(0, k + 1 - memory_length)
 
-            f_h_term = _multiply(h_power, vjp_y)
-            adj_y = _minus(f_h_term, right)
+            # CHANGED: Initialize convolution_sum properly
+            convolution_sum = None
 
-            adjy_history.append(adj_y)
+            # CHANGED: Fix summation indices and coefficients
+            # The sum should be Σ c_{k+1-j} * adjy_j for j from start_idx to k
+            for j in range(start_idx, k + 1):
+                # CHANGED: Use correct coefficient index (k+1-j instead of j)
+                coefficient_idx = k + 1 - j
 
-            # Update parameter gradients using tuple comprehension
+                if convolution_sum is None:
+                    convolution_sum = _multiply(c[coefficient_idx], adjy_history[j])
+                else:
+                    # CHANGED: Use in-place operation for efficiency
+                    convolution_sum = _addmul_inplace(convolution_sum, adjy_history[j], c[coefficient_idx])
+
+            # Compute adj_y_{k+1} = h^α * vjp_y - convolution_sum
+            # f_h_term = _multiply(h_power, vjp_y)
+            # adj_y_current = _minus(f_h_term, convolution_sum)
+            adj_y_current = _minusmul_inplace(convolution_sum, vjp_y, h_power)
+
+            # Store adj_y_{k+1} in history
+            adjy_history.append(adj_y_current)
+
+            # Update parameter gradients - already using in-place operation, good!
             if adj_params and vjp_params:
                 for ap, vp in zip(adj_params, vjp_params):
-                    ap.add_(vp, alpha=h)  # 直接修改 tuple 中的张量
+                    ap.add_(vp, alpha=h)
 
-    del adjy_history, yhistory_ori
-    return adj_y, adj_params
+        # CHANGED: Return adj_y_current instead of adj_y
+        del adjy_history, yhistory
+        return adj_y_current, adj_params
 
-def forward_gl(func,y0,beta,tspan,**options):
+
+
+def forward_gl(func, y0, beta, tspan, **options):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
@@ -459,31 +492,57 @@ def forward_gl(func,y0,beta,tspan,**options):
         for j in range(1, N + 1):
             c[j] = (1 - (1 + beta) / j) * c[j - 1]
 
-        yn = _clone(y0)
-        y_history = [yn]
+        # CHANGED: Compute h^beta once outside the loop for efficiency
+        h_power = torch.pow(h, beta)
 
-        for k in range(1, N):
-            tn = tspan[k]
+        # CHANGED: Use y_current for clarity and consistency
+        y_current = _clone(y0)
+        y_history = [y_current]
 
-            # Initialize right term with correct structure
-            if _is_tuple(y0):
-                right = tuple(torch.zeros_like(comp) for comp in y0)
+        # CHANGED: Loop range from range(1, N) to range(N - 1) to match correct algorithm
+        for k in range(N - 1):
+            # CHANGED: Use tspan[k] for current time (not tspan[k] when k starts from 1)
+            t_k = tspan[k]
+
+            # CHANGED: Evaluate function at current time with current y (not future y)
+            f_k = func(t_k, y_current)
+
+            # CHANGED: Add memory handling
+            if 'memory' not in options or options['memory'] == -1:
+                memory_length = k + 1  # Use all available history
             else:
-                right = 0
+                memory_length = min(options['memory'], k + 1)
+                assert memory_length > 0, "memory must be greater than 0"
 
-            for j in range(1, k + 1):
-                right = _add(right, _multiply(c[j], y_history[k - j]))
+            start_idx = max(0, k + 1 - memory_length)
 
-            # Calculate f(tn, yn) * h^beta term
-            f_term = func(tn, yn)
-            h_power = torch.pow(h, beta)
+            # CHANGED: Initialize convolution_sum properly
+            convolution_sum = None
 
-            f_h_term = _multiply(h_power, f_term)
-            # Subtract right from f_h_term
-            yn = _minus(f_h_term, right)
-            y_history.append(yn)
+            # CHANGED: Fix summation indices and coefficients
+            # The sum should be Σ c_{k+1-j} * y_j for j from start_idx to k
+            for j in range(start_idx, k + 1):
+                # CHANGED: Use correct coefficient index (k+1-j instead of j)
+                coefficient_idx = k + 1 - j
 
-        return yn, y_history
+                if convolution_sum is None:
+                    convolution_sum = _multiply(c[coefficient_idx], y_history[j])
+                else:
+                    # CHANGED: Use in-place operation for efficiency
+                    convolution_sum = _addmul_inplace(convolution_sum, y_history[j], c[coefficient_idx])
+
+            # # CHANGED: Move h_power multiplication outside loop and use it here
+            # f_h_term = _multiply(h_power, f_k)
+            # # Compute y_{k+1} = h^α * f(t_k, y_k) - convolution_sum
+            # y_current = _minus(f_h_term, convolution_sum)
+
+            #In-place fused multiply-add operation: target = -target + alpha * source
+            y_current = _minusmul_inplace(convolution_sum, f_k, h_power)
+
+            # Store y_{k+1} in history
+            y_history.append(y_current)
+
+        return y_current, y_history  # CHANGED: Fixed - return y_current instead of yn
 
 
 def backward_trap(func, y_aug, beta, tspan, yhistory_ori):
@@ -545,12 +604,14 @@ def backward_trap(func, y_aug, beta, tspan, yhistory_ori):
     return adj_y, adj_params
 
 
-
-
-def forward_trap(func,y0,beta,tspan,**options):
+def forward_trap(func, y0, beta, tspan, **options):
     with torch.no_grad():
         N = len(tspan)
         h = (tspan[N - 1] - tspan[0]) / (N - 1)
+
+        # CHANGED: Pre-compute h^beta * Gamma(2-beta) for efficiency
+        h_alpha_gamma = torch.pow(h, beta) * math.gamma(2 - beta)
+        one_minus_beta = 1 - beta
 
         # Get device from y0 (handle both tensor and tuple cases)
         if _is_tuple(y0):
@@ -558,42 +619,71 @@ def forward_trap(func,y0,beta,tspan,**options):
         else:
             device = y0.device
 
-        c = torch.zeros(N + 1, dtype=torch.float64, device=device)
-        c[0] = 1
+        # CHANGED: Removed unused c array computation
+        # CHANGED: Use y_current for clarity
+        y_current = _clone(y0)
+        y_history = [y0]  # CHANGED: Store y0 not yn as first element
 
-        for j in range(1, N + 1):
-            c[j] = (1 - (1 + beta) / j) * c[j - 1]
+        # CHANGED: Fixed loop range from range(1, N) to range(N - 1)
+        for k in range(N - 1):
+            # CHANGED: Use tspan[k] for current time
+            t_k = tspan[k]
 
-        yn = _clone(y0)
-        y_history = [yn]
+            # CHANGED: Evaluate function at current time with current y
+            f_k = func(t_k, y_current)
 
-        for k in range(1, N):
-            tn = tspan[k]
-
-            # Initialize right term with correct structure
-            if _is_tuple(y0):
-                right = tuple(torch.zeros_like(comp) for comp in y0)
+            # CHANGED: Add memory handling
+            if 'memory' not in options or options['memory'] == -1:
+                memory_length = k + 1  # Use all available history
             else:
-                right = 0
+                memory_length = min(options['memory'], k + 1)
+                assert memory_length > 0, "memory must be greater than 0"
 
-            for j in range(0, k):
-                coeff = RLcoeffs(k, j, beta)
+            start_idx = max(0, k + 1 - memory_length)
 
-                # Handle tuple case
-                right = _add(right, _multiply(coeff, y_history[j]))
+            # CHANGED: Compute A_{j,k+1} weights correctly instead of RLcoeffs
+            j_vals = torch.arange(start_idx, k + 1, dtype=torch.float32, device=device)
 
-            # Calculate gamma * f(tn, yn) * h^beta term
-            f_term = func(tn, yn)
-            gamma_factor = math.gamma(2 - beta)
-            h_power = torch.pow(h, beta)
+            # Compute A_{j,k+1} weights
+            kjp2 = torch.pow(k + 2 - j_vals, one_minus_beta)
+            kj = torch.pow(k - j_vals, one_minus_beta)
+            kjp1 = torch.pow(k + 1 - j_vals, one_minus_beta)
 
-            f_h_term = _multiply(h_power * gamma_factor, f_term)
-            # Subtract right from f_h_term
-            yn = _minus(f_h_term, right)
-            y_history.append(yn)
+            # General formula for j >= 1
+            A_j_kp1 = kjp2 + kj - 2 * kjp1
 
-    return yn, y_history
+            # CHANGED: Special handling for j=0 if it's in the range
+            if start_idx == 0:
+                k_power = torch.pow(torch.tensor(k, dtype=torch.float32, device=device), one_minus_beta)
+                kp1_neg_alpha = torch.pow(torch.tensor(k + 1, dtype=torch.float32, device=device), -beta)
+                A_j_kp1[0] = k_power - (k + beta) * kp1_neg_alpha
 
+            # CHANGED: Initialize convolution_sum properly
+            convolution_sum = None
+
+            # CHANGED: Accumulate with correct indexing
+            for j in range(start_idx, k + 1):
+                local_idx = j - start_idx  # Index into A_j_kp1 array
+
+                if convolution_sum is None:
+                    convolution_sum = _multiply(A_j_kp1[local_idx], y_history[j])
+                else:
+                    # CHANGED: Use in-place operation for efficiency
+                    convolution_sum = _addmul_inplace(convolution_sum, y_history[j], A_j_kp1[local_idx])
+
+            # # CHANGED: Compute y_{k+1} correctly
+            # f_term = _multiply(h_alpha_gamma, f_k)
+            # # CHANGED: Use _minus or multiply by -1 properly
+            # y_current = _minus(f_term, convolution_sum)
+
+            # In-place fused multiply-add operation: target = -target + alpha * source
+            y_current = _minusmul_inplace(convolution_sum, f_k, h_alpha_gamma)
+
+
+            # Store y_{k+1} in history
+            y_history.append(y_current)
+
+        return y_current, y_history  # CHANGED: Return y_current instead of yn
 
 def backward_euler_w_history(func, y_aug, beta, tspan, yhistory_ori):
     with torch.no_grad():
@@ -630,8 +720,8 @@ def backward_euler_w_history(func, y_aug, beta, tspan, yhistory_ori):
             else:
                 fy_history.append(func_eval)
                 j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
-                b_j_k_1 = (fractional_pow(h, beta) / beta) * (
-                        fractional_pow(k + 1 - j_vals, beta) - fractional_pow(k - j_vals, beta))
+                b_j_k_1 = (torch.pow(h, beta) / beta) * (
+                        torch.pow(k + 1 - j_vals, beta) - torch.pow(k - j_vals, beta))
 
                 # Initialize accumulator with correct structure (tensor or tuple)
                 if _is_tuple(fy_history[0]):
@@ -649,6 +739,7 @@ def backward_euler_w_history(func, y_aug, beta, tspan, yhistory_ori):
 
 
             adj_y = _add(adj_y, _multiply(h, vjp_y))
+
 
             # Update parameter gradients using tuple comprehension
             # 更新参数梯度

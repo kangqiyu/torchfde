@@ -163,11 +163,129 @@ def _multiply(a, b):
         return tuple(a * b_i for b_i in b)
     return a * b
 
-
 def _clone(y):
     if _is_tuple(y):
         return tuple(y_i.clone() for y_i in y)
     return y.clone()
+
+
+def _addmul_inplace(target, source, alpha):
+    """In-place fused multiply-add operation: target += alpha * source
+
+    Supports both tensor and tuple-of-tensors operations.
+
+    Args:
+        target: Tensor or tuple of tensors to be modified in-place
+        source: Tensor or tuple of tensors to be added
+        alpha: Scalar multiplier or tuple/list of scalars
+               - If scalar: applies uniformly to all elements
+               - (deleted) If tuple/list: applies element-wise (must match source length)
+
+    Returns:
+        target: Modified in-place (returned for convenience)
+
+    Raises:
+        TypeError: If target/source type mismatch
+        ValueError: If tuple lengths don't match
+    """
+    if isinstance(source, tuple):
+        # Validate target is also a tuple
+        if not isinstance(target, tuple):
+            raise TypeError(
+                f"Type mismatch: source is tuple but target is {type(target).__name__}"
+            )
+
+        # Validate tuple lengths match
+        if len(target) != len(source):
+            raise ValueError(
+                f"Length mismatch: target has {len(target)} elements, "
+                f"source has {len(source)} elements"
+            )
+        # # Handle alpha as either scalar or tuple/list
+        # if isinstance(alpha, (tuple, list)):
+        #     # Validate alpha length matches
+        #     if len(alpha) != len(source):
+        #         raise ValueError(
+        #             f"Length mismatch: alpha has {len(alpha)} elements, "
+        #             f"source has {len(source)} elements"
+        #         )
+        #     # Element-wise operations with different alphas
+        #     for t_elem, s_elem, a_elem in zip(target, source, alpha):
+        #         t_elem.add_(s_elem, alpha=a_elem)
+        # else:
+            # Element-wise operations with same alpha
+        for t_elem, s_elem in zip(target, source):
+            t_elem.add_(s_elem, alpha=float(alpha))
+    else:
+        # Direct tensor operation
+        if isinstance(target, tuple):
+            raise TypeError(
+                f"Type mismatch: source is {type(source).__name__} but target is tuple"
+            )
+        target.add_(source, alpha=float(alpha))
+
+    return target
+
+
+def _minusmul_inplace(target, source, alpha):
+    """In-place fused multiply-add operation: target = -target + alpha * source
+
+    Supports both tensor and tuple-of-tensors operations.
+
+    Args:
+        target: Tensor or tuple of tensors to be modified in-place
+        source: Tensor or tuple of tensors to be added
+        alpha: Scalar multiplier
+
+    Returns:
+        target: Modified in-place (returned for convenience)
+
+    Raises:
+        TypeError: If target/source type mismatch
+        ValueError: If tuple lengths don't match
+    """
+    if isinstance(source, tuple):
+        # Validate target is also a tuple
+        if not isinstance(target, tuple):
+            raise TypeError(
+                f"Type mismatch: source is tuple but target is {type(target).__name__}"
+            )
+        # Validate tuple lengths match
+        if len(target) != len(source):
+            raise ValueError(
+                f"Length mismatch: target has {len(target)} elements, "
+                f"source has {len(source)} elements"
+            )
+        # Element-wise operations: target = -target + alpha * source
+        for t_elem, s_elem in zip(target, source):
+            t_elem.neg_().add_(s_elem, alpha=float(alpha))
+    else:
+        # Direct tensor operation
+        if isinstance(target, tuple):
+            raise TypeError(
+                f"Type mismatch: source is {type(source).__name__} but target is tuple"
+            )
+        target.neg_().add_(source, alpha=float(alpha))
+
+    return target
+
+def _mul_inplace(target, scalar):
+    """In-place multiplication: target *= scalar
+
+    Args:
+        target: Tensor or tuple of tensors to be modified in-place
+        scalar: Scalar multiplier
+
+    Returns:
+        target: Modified in-place
+    """
+    if isinstance(target, tuple):
+        for t_elem in target:
+            t_elem.mul_(float(scalar))
+    else:
+        target.mul_(float(scalar))
+
+    return target
 
 class ReversedListView:
     def __init__(self, original_list):

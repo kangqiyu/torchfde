@@ -1,15 +1,14 @@
 from .utils_fde import _check_inputs, _flat_to_shape
-from .explicit_solver import Predictor,Predictor_Corrector
-from .implicit_solver import Implicit_l1
-from .riemann_liouville_solver import GLmethod,Product_Trap
+from .caputo_solver import predictor,l1solver, predictor_corrector
+from .riemann_liouville_solver import glmethod, product_trap
 from . import config
 import torch
 
-SOLVERS = {"predictor":Predictor,
-          "corrector":Predictor_Corrector,
-           "implicitl1":Implicit_l1,
-           "gl":GLmethod,
-           "trap":Product_Trap
+SOLVERS = {"predictor":predictor,
+          "corrector":predictor_corrector,
+           "l1":l1solver,
+           "gl":glmethod,
+           "trap":product_trap
 }
 
 def fdeint(func,y0,beta,t,step_size,method,options=None):
