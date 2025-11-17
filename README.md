@@ -49,7 +49,7 @@ out = fdeint(odefunc, z_0, beta, T, step_size, method)
 
 - `T`: Scalar terminal time for integration.
 -  `method`: Integration methods (currently all of them are explicit) supported:
-    * adjoint method: `'predictor-f'`, `'predictor-o'`, `'gl-f'`, `'gl-o'`, `'trap-f'`, `'trap-o'`
+    * adjoint method: `'predictor-f'`, `'predictor-o'`, `'l1-f'`, `'l1-o'`,`'gl-f'`, `'gl-o'`, `'trap-f'`, `'trap-o'`
     * direct method:  `'predictor'`, `'corrector'`, `'l1'`, `'gl'`, `'trap'`  
 
 ## References

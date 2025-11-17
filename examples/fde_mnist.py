@@ -28,9 +28,10 @@ parser.add_argument('--debug', action='store_true')
 parser.add_argument('--gpu', type=int, default=0)
 
 parser.add_argument('--method', type=str, choices=
-                            ['predictor-f','predictor-o', 'gl-f', 'gl-o', 'trap-f', 'trap-o', #for adjoint method
+                            ['predictor-f','predictor-o', 'l1-f', 'l1-o',
+                             'gl-f', 'gl-o', 'trap-f', 'trap-o', #for adjoint method
                             'predictor', 'l1', 'gl', 'trap', #'corrector', # for direct method
-                            ], default='trap-o')
+                            ], default='l1-o')
 
 # parameters for the FDE solver
 parser.add_argument('--adjoint', type=eval, default=True, choices=[True, False])
