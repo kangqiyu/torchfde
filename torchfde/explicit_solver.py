@@ -1,5 +1,7 @@
 """
-This module is a work in progress intended to provide a unified implementation for the solvers previously located in caputo_solver.py and riemann_liouville_solver.py.
+
+This module is a work in progress intended to provide a unified implementation for
+the solvers previously located in caputo_solver.py and riemann_liouville_solver.py.
 
 """
 
@@ -24,6 +26,8 @@ class FractionalSolverConfig:
         self.tspan = tspan
         self.y0 = y0
         self.device = y0[0].device if _is_tuple(y0) else y0.device
+        self.dtype = y0[0].dtype if _is_tuple(y0) else y0.dtype
+
         self.options = options
 
         # Common precomputed values
@@ -62,7 +66,7 @@ def compute_convolution(start_idx: int, end_idx: int, weights: torch.Tensor,
 # Weight computation strategies
 def adams_bashforth_weights(k: int, start_idx: int, config: FractionalSolverConfig) -> torch.Tensor:
     """Compute Adams-Bashforth weights"""
-    j_vals = torch.arange(start_idx, k + 1, dtype=torch.float32, device=config.device).unsqueeze(1)
+    j_vals = torch.arange(start_idx, k + 1, dtype=config.dtype, device=config.device).unsqueeze(1)
     h_beta_over_beta = config.h_beta / config.beta
     return h_beta_over_beta * (torch.pow(k + 1 - j_vals, config.beta) -
                                torch.pow(k - j_vals, config.beta))
@@ -70,7 +74,7 @@ def adams_bashforth_weights(k: int, start_idx: int, config: FractionalSolverConf
 
 def l1_weights(k: int, start_idx: int, config: FractionalSolverConfig) -> torch.Tensor:
     """Compute L1 method weights"""
-    j_vals = torch.arange(start_idx, k + 1, dtype=torch.float32, device=config.device)
+    j_vals = torch.arange(start_idx, k + 1, dtype=config.dtype, device=config.device)
 
     kjp2 = torch.pow(k + 2 - j_vals, config.one_minus_beta)
     kjp1 = torch.pow(k + 1 - j_vals, config.one_minus_beta)
@@ -78,9 +82,9 @@ def l1_weights(k: int, start_idx: int, config: FractionalSolverConfig) -> torch.
     c_j_k = kjp2 - 2 * kjp1 + kj
 
     if start_idx == 0:
-        c_j_k[0] = -(torch.pow(torch.tensor(k + 1, dtype=torch.float32, device=config.device),
+        c_j_k[0] = -(torch.pow(torch.tensor(k + 1, dtype=config.dtype, device=config.device),
                                config.one_minus_beta) -
-                     torch.pow(torch.tensor(k, dtype=torch.float32, device=config.device),
+                     torch.pow(torch.tensor(k, dtype=config.dtype, device=config.device),
                                config.one_minus_beta))
     return c_j_k
 
@@ -96,7 +100,7 @@ def grunwald_letnikov_weights(k: int, start_idx: int, config: FractionalSolverCo
 
 def product_trap_weights(k: int, start_idx: int, config: FractionalSolverConfig) -> torch.Tensor:
     """Compute Product Trapezoidal weights"""
-    j_vals = torch.arange(start_idx, k + 1, dtype=torch.float32, device=config.device)
+    j_vals = torch.arange(start_idx, k + 1, dtype=config.dtype, device=config.device)
 
     kjp2 = torch.pow(k + 2 - j_vals, config.one_minus_beta)
     kj = torch.pow(k - j_vals, config.one_minus_beta)
@@ -105,9 +109,9 @@ def product_trap_weights(k: int, start_idx: int, config: FractionalSolverConfig)
     A_j_kp1 = kjp2 + kj - 2 * kjp1
 
     if start_idx == 0:
-        k_power = torch.pow(torch.tensor(k, dtype=torch.float32, device=config.device),
+        k_power = torch.pow(torch.tensor(k, dtype=config.dtype, device=config.device),
                             config.one_minus_beta)
-        kp1_neg_alpha = torch.pow(torch.tensor(k + 1, dtype=torch.float32, device=config.device),
+        kp1_neg_alpha = torch.pow(torch.tensor(k + 1, dtype=config.dtype, device=config.device),
                                   -config.beta)
         A_j_kp1[0] = k_power - (k + config.beta) * kp1_neg_alpha
 

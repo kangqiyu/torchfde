@@ -1,6 +1,6 @@
 from .utils_fde import _check_inputs, _flat_to_shape
 from .caputo_solver import predictor,l1solver, predictor_corrector
-from .riemann_liouville_solver import glmethod, product_trap
+from .riemann_liouville_solver import glmethod, product_trap, glmethod_multiterm
 from . import config
 import torch
 
@@ -8,7 +8,8 @@ SOLVERS = {"predictor":predictor,
           "corrector":predictor_corrector,
            "l1":l1solver,
            "gl":glmethod,
-           "trap":product_trap
+           "trap":product_trap,
+           "glmulti":glmethod_multiterm,
 }
 
 def fdeint(func,y0,beta,t,step_size,method,options=None):

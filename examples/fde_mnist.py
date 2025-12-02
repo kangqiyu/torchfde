@@ -30,14 +30,20 @@ parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--method', type=str, choices=
                             ['predictor-f','predictor-o', 'l1-f', 'l1-o',
                              'gl-f', 'gl-o', 'trap-f', 'trap-o', #for adjoint method
-                            'predictor', 'l1', 'gl', 'trap', #'corrector', # for direct method
-                            ], default='l1-o')
+                            'predictor', 'l1', 'gl', 'trap', "glmulti" #'corrector', # for direct method
+
+                            ], default='predictor')
 
 # parameters for the FDE solver
-parser.add_argument('--adjoint', type=eval, default=True, choices=[True, False])
+parser.add_argument('--adjoint', type=eval, default=False, choices=[True, False])
 parser.add_argument('--step_size', type=float, default=0.1)
 parser.add_argument('--beta', type=float, default=0.5)
 parser.add_argument('--T', type=float, default=5)
+
+# NEW: Allow lists for multi-term
+parser.add_argument('--multi_coefficient', type=float, nargs='+', default=None)
+parser.add_argument('--multi_beta', type=float, nargs='+', default=None)
+parser.add_argument('--learn_coefficient', action='store_true', help='Make coefficients learnable')
 
 
 args = parser.parse_args()
@@ -131,7 +137,17 @@ class ODEfunc(nn.Module):
         out = self.conv2(t, out)
         out = self.norm3(out)
         return out
-
+#
+# class ODEBlock(nn.Module):
+#
+#     def __init__(self, odefunc):
+#         super(ODEBlock, self).__init__()
+#         self.odefunc = odefunc
+#
+#     def forward(self, x):
+#         out = fdeint(self.odefunc, x, torch.tensor(args.beta), t=args.T,
+#                      step_size=args.step_size, method=args.method)#, options={"memory": 1,})
+#         return out
 
 class ODEBlock(nn.Module):
 
@@ -139,11 +155,36 @@ class ODEBlock(nn.Module):
         super(ODEBlock, self).__init__()
         self.odefunc = odefunc
 
-    def forward(self, x):
-        out = fdeint(self.odefunc, x, torch.tensor(args.beta), t=args.T,
-                     step_size=args.step_size, method=args.method)#, options={"memory": 1,})
-        return out
+        if args.multi_coefficient is not None:
+            coeff_tensor = torch.tensor(args.multi_coefficient, dtype=torch.float32)
+            beta_tensor = torch.tensor(args.multi_beta, dtype=torch.float32)
 
+            if args.learn_coefficient:
+                # Learnable parameters
+                self.multi_coefficient = nn.Parameter(coeff_tensor)
+            else:
+                # Fixed (non-learnable) - use register_buffer so it moves with .to(device)
+                self.register_buffer('multi_coefficient', coeff_tensor)
+
+            self.register_buffer('multi_beta', beta_tensor)
+        else:
+            self.multi_coefficient = None
+            self.multi_beta = None
+
+    def forward(self, x):
+        options = {"memory": -1}
+
+        if self.multi_coefficient is not None:
+            # Explicitly ensure tensors are on the same device as input x
+            current_beta = self.multi_beta.to(x.device)
+            options["multi_coefficient"] = self.multi_coefficient.to(x.device)
+        else:
+            current_beta = torch.tensor(args.beta, device=x.device, dtype=x.dtype)
+
+        out = fdeint(self.odefunc, x, current_beta, t=args.T,
+                     step_size=args.step_size, method=args.method,
+                     options=options)
+        return out
 
 
 class Flatten(nn.Module):
@@ -318,6 +359,8 @@ if __name__ == '__main__':
     fc_layers = [norm(64), nn.ReLU(inplace=True), nn.AdaptiveAvgPool2d((1, 1)), Flatten(), nn.Linear(64, 10)]
 
     model = nn.Sequential(*downsampling_layers, *feature_layers, *fc_layers).to(device)
+
+    print(feature_layers[0].multi_coefficient,feature_layers[0].multi_beta)
 
     logger.info(model)
     logger.info('Number of parameters: {}'.format(count_parameters(model)))

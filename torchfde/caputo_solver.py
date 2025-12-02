@@ -9,27 +9,27 @@ from .utils_fde import _is_tuple, _clone, _add, _multiply
 def predictor(func, y0, beta, tspan, **options):
     """Use one-step Adams-Bashforth (Euler) method to integrate Caputo equation
         D^beta y(t) = f(t,y)
+        From the paper "Detailed error analysis for a fractional adams method,
+        Numerical algorithms, vol. 36, no. 1, pp. 31–52, 2004."
+
         Args:
-          beta: fractional exponent in the range (0,1)
-          f: callable(y,t) returning a numpy array of shape (d,)
-             Vector-valued function to define the right hand side of the system
-          y0: N-D Tensor or tuple of Tensors giving the initial state vector y(t==0)
+          func: returning f(t,y), with the same shape as y0
+          y0: Tensor or tuple of Tensors, giving the initial state vector y(t==0)
+          beta: fractional order in the range (0,1)
           tspan (array): The sequence of time points for which to solve for y.
             These must be equally spaced, e.g. np.arange(0,10,0.005)
-            tspan[0] is the intial time corresponding to the initial state y0.
+            tspan[0] is the initial time corresponding to the initial state y0.
         Returns:
-          y: Tensor or tuple of Tensors with the same structure as y0
-             With the initial value y0 in the first row
+          y: Tensor or tuple of Tensors (with the same shape as y0) at time tspan[-1]
         """
+
     N = len(tspan)
     h = (tspan[-1] - tspan[0]) / (N - 1)
-    gamma_beta = 1 / math.gamma(beta)
-    h_beta_over_beta = torch.pow(h, beta) / beta
+    # gamma_beta = 1 / math.gamma(beta)
+    h_beta_over_beta = torch.pow(h, beta) / (beta * math.gamma(beta))
     # Get device from y0 (handle both tensor and tuple cases)
-    if _is_tuple(y0):
-        device = y0[0].device
-    else:
-        device = y0.device
+    device = y0[0].device if _is_tuple(y0) else y0.device
+    dtype = y0[0].dtype if _is_tuple(y0) else y0.dtype
 
     y_current = _clone(y0)
     fhistory = []
@@ -52,7 +52,7 @@ def predictor(func, y0, beta, tspan, **options):
         start_idx = max(0, k + 1 - memory_length)
 
         # Compute weights for indices from start_idx to k
-        j_vals = torch.arange(start_idx, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
+        j_vals = torch.arange(start_idx, k + 1, dtype=dtype, device=device).unsqueeze(1)
         b_j_k_1 = h_beta_over_beta * (torch.pow(k + 1 - j_vals, beta) - torch.pow(k - j_vals, beta))
 
         # Initialize accumulator
@@ -71,7 +71,7 @@ def predictor(func, y0, beta, tspan, **options):
                 convolution_sum = _add(convolution_sum, _multiply(b_j_k_1[local_idx], fhistory[j]))
 
         # Compute y_{k+1}
-        weight_term = _multiply(gamma_beta, convolution_sum)
+        weight_term = convolution_sum #_multiply(gamma_beta, convolution_sum)
         y_current = _add(y0, weight_term)
 
     # release memory
@@ -83,17 +83,18 @@ def predictor(func, y0, beta, tspan, **options):
 def l1solver(func, y0, beta, tspan, **options):
     """Use L1 method to integrate Caputo equation
         D^beta y(t) = f(t,y)
+        From the paper “A compact finite difference scheme for the fractional sub-diffusion equations,
+        Journal of Computational Physics, vol. 230, no. 3, pp. 586–595, 2011."
+
         Args:
-          beta: fractional exponent in the range (0,1)
-          func: callable(y,t) returning a numpy array of shape (d,)
-             Vector-valued function to define the right hand side of the system
-          y0: N-D Tensor or tuple of Tensors giving the initial state vector y(t==0)
+          func: returning f(t,y), with the same shape as y0
+          y0: Tensor or tuple of Tensors, giving the initial state vector y(t==0)
+          beta: fractional order in the range (0,1)
           tspan (array): The sequence of time points for which to solve for y.
             These must be equally spaced, e.g. np.arange(0,10,0.005)
             tspan[0] is the initial time corresponding to the initial state y0.
         Returns:
-          y: Tensor or tuple of Tensors with the same structure as y0
-             With the initial value y0 in the first row
+          y: Tensor or tuple of Tensors (with the same shape as y0) at time tspan[-1]
         """
     N = len(tspan)
     h = (tspan[-1] - tspan[0]) / (N - 1)
@@ -101,10 +102,8 @@ def l1solver(func, y0, beta, tspan, **options):
     one_minus_beta = 1 - beta
 
     # Get device from y0 (handle both tensor and tuple cases)
-    if _is_tuple(y0):
-        device = y0[0].device
-    else:
-        device = y0.device
+    device = y0[0].device if _is_tuple(y0) else y0.device
+    dtype = y0[0].dtype if _is_tuple(y0) else y0.dtype
 
     y_current = _clone(y0)
     yhistory = [y0]  # Store y0 as the first element
@@ -126,7 +125,7 @@ def l1solver(func, y0, beta, tspan, **options):
         start_idx = max(0, k + 1 - memory_length)
 
         # Vectorized computation of c_j^(k) weights for indices from start_idx to k
-        j_vals = torch.arange(start_idx, k + 1, dtype=torch.float32, device=device)
+        j_vals = torch.arange(start_idx, k + 1, dtype=dtype, device=device)
 
         # Compute c_j^(k) for all j values
         # For j >= 1: c_j^(k) = (k-j+2)^{1-α} - 2(k-j+1)^{1-α} + (k-j)^{1-α}
@@ -140,8 +139,8 @@ def l1solver(func, y0, beta, tspan, **options):
 
         # Special handling for j=0 if it's in the range
         if start_idx == 0:
-            c_j_k[0] = -(torch.pow(torch.tensor(k + 1, dtype=torch.float32, device=device), one_minus_beta) -
-                         torch.pow(torch.tensor(k, dtype=torch.float32, device=device), one_minus_beta))
+            c_j_k[0] = -(torch.pow(torch.tensor(k + 1, dtype=dtype, device=device), one_minus_beta) -
+                         torch.pow(torch.tensor(k, dtype=dtype, device=device), one_minus_beta))
 
         # Initialize accumulator for the sum
         # if _is_tuple(y0):
@@ -195,10 +194,8 @@ def predictor_corrector(func, y0, beta, tspan,**options):
     fhistory = []
 
     # Get device from y0 (handle both tensor and tuple cases)
-    if _is_tuple(y0):
-        device = y0[0].device
-    else:
-        device = y0.device
+    device = y0[0].device if _is_tuple(y0) else y0.device
+    dtype = y0[0].dtype if _is_tuple(y0) else y0.dtype
 
     yn = _clone(y0)
 
@@ -214,7 +211,7 @@ def predictor_corrector(func, y0, beta, tspan,**options):
             memory = options['memory']
         memory_k = max(0, k+1 - memory)
 
-        j_vals = torch.arange(0, k + 1, dtype=torch.float32, device=device).unsqueeze(1)
+        j_vals = torch.arange(0, k + 1, dtype=dtype, device=device).unsqueeze(1)
         b_j_k_1 = (torch.pow(h, beta) / beta) * (
                 torch.pow(k + 1 - j_vals, beta) - torch.pow(k - j_vals, beta))
 
@@ -234,7 +231,7 @@ def predictor_corrector(func, y0, beta, tspan,**options):
 
 
 
-        a_j_k_1 = a_item * torch.ones((k + 2, 1), dtype=torch.float32, device=device)
+        a_j_k_1 = a_item * torch.ones((k + 2, 1), dtype=dtype, device=device)
         a_j_k_1[0] = a_item * (torch.pow(k, beta + 1) - (k - beta) * torch.pow(k + 1, beta))
         for j in range(1, k + 1):
             a_j_k_1[j] = a_item * (
