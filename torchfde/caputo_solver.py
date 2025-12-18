@@ -1,3 +1,8 @@
+"""
+Deprecation Notice: `predictor` and `l1solver` have been moved to `explicit_solver.py`.
+
+"""
+
 import torch
 import math
 from .utils_fde import _is_tuple, _clone, _add, _multiply
