@@ -1,7 +1,11 @@
+"""
+Deprecation Notice: `glmethod` and `product_trap` have been moved to `explicit_solver.py`.
+
+"""
+
 import torch
 import math
 from .utils_fde import _is_tuple, _clone, _add, _multiply, _minus
-from . import config
 
 def glmethod(func, y0, beta, tspan, **options):
     """Use Grünwald-Letnikov method to integrate RL fractional equation

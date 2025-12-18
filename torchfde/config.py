@@ -23,6 +23,32 @@ Concat/split overhead is usually outweighed by computational gains.
 tensors have very different sizes.
 """
 
+"""
+
+See _check_inputs function in utils_fde.py
+
+CONCAT MODE:
+
+If y0 is a tuple: flatten and concatenate all elements into a single tensor, store shapes
+If y0 is a tensor: keep as-is, set tensor_input = True
+Then, regardless of original type, if y0 is a tensor, wrap it in a tuple: y0 = (y0,)
+
+
+LOOP MODE (non-concat):
+
+If y0 is a tensor: set tensor_input = True
+Then, if y0 is a tensor, wrap it in a tuple: y0 = (y0,)
+
+
+So after _check_inputs:
+
+y0 is ALWAYS a tuple (either original tuple, or single tensor wrapped in tuple)
+tensor_input = True means original was a single tensor
+shapes is set only in CONCAT mode when original was a tuple
+
+"""
+
+
 # Other global settings
 # TODO: may update other setting
 MEMORY = math.inf
@@ -48,16 +74,3 @@ def get_tensor_mode():
     return TENSOR_MODE
 
 
-
-# solver.py - Example usage in other files
-# import config
-#
-# def solve_ode(func, y0, t, **kwargs):
-#     if config.TENSOR_MODE == 'concat':
-#         return _solve_with_concat(func, y0, t, **kwargs)
-#     else:
-#         return _solve_with_loop(func, y0, t, **kwargs)
-
-# Usage example
-# import mypackage.config as config
-# config.set_tensor_mode('loop')
